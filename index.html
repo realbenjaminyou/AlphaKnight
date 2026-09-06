@@ -3,23 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Play vs AlphaKnight - Multi-Engine Edition</title>
+  <title>AlphaKnight Arena — Elite AI Chess Suite</title>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
   <style>
     :root {
-      --bg-main: #141518;
-      --bg-panel: #1e2025;
-      --bg-card: #262930;
-      --text-main: #e6e8eb;
+      --bg-main: #0a0b0e;
+      --bg-panel: rgba(22, 24, 30, 0.82);
+      --bg-card: rgba(30, 33, 42, 0.75);
+      --text-main: #f0f2f5;
       --text-dim: #9ba1ad;
-      --accent: #4fa3d1;
-      --accent-gold: #e5a93c;
-      --sq-light: #ecefe4;
-      --sq-dark: #779952;
+      --accent: #58a6ff;
+      --accent-glow: rgba(88, 166, 255, 0.25);
+      --accent-gold: #f1e05a;
+      --sq-light: #eaeedb;
+      --sq-dark: #769656;
       --sq-selected: #baca44;
-      --sq-highlight: rgba(245, 230, 90, 0.55);
-      --sq-move-dot: rgba(20, 85, 30, 0.35);
-      --danger: #d9534f;
+      --sq-highlight: rgba(245, 230, 90, 0.6);
+      --sq-move-dot: rgba(30, 110, 40, 0.5);
+      --danger: #f85149;
+      --border-glass: rgba(255, 255, 255, 0.08);
+      --backdrop-blur: blur(16px);
     }
 
     * {
@@ -33,115 +36,141 @@
       background-color: var(--bg-main);
       color: var(--text-main);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
-      min-height: 100vh;
-      padding: 16px;
+      position: relative;
+      overflow-x: hidden;
+      padding: 20px;
+    }
+
+    /* Cinematic Immersive Background with High-End Chess Imagery */
+    body::before {
+      content: "";
+      position: fixed;
+      top: 0; left: 0; width: 100vw; height: 100vh;
+      background: linear-gradient(180deg, rgba(10, 11, 14, 0.75) 0%, rgba(10, 11, 14, 0.95) 60%, #0a0b0e 100%),
+                  url('https://images.unsplash.com/photo-1529699211952-734e80c4d42b?q=80&w=2000&auto=format&fit=crop') no-repeat center center fixed;
+      background-size: cover;
+      z-index: -1;
+      filter: brightness(0.4) contrast(1.1);
     }
 
     header {
       width: 100%;
-      max-width: 1060px;
-      margin-bottom: 12px;
+      max-width: 1200px;
+      margin-bottom: 20px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-bottom: 1px solid #30343e;
-      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border-glass);
+      padding-bottom: 14px;
+      backdrop-filter: var(--backdrop-blur);
     }
 
     header h1 {
-      font-size: 1.45rem;
-      letter-spacing: 0.5px;
+      font-size: 1.75rem;
+      letter-spacing: 0.8px;
       color: #fff;
+      font-weight: 800;
+      background: linear-gradient(135deg, #ffffff 30%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
 
     header .subline {
-      font-size: 0.82rem;
-      color: var(--accent);
-      font-weight: 600;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      font-weight: 500;
+      letter-spacing: 0.3px;
     }
 
-    /* Prominent Engine Selector Bar */
+    /* Glassmorphism Model Selector Bar */
     .model-selector-bar {
       width: 100%;
-      max-width: 1060px;
-      background: linear-gradient(135deg, #1b2838, #202736);
-      border: 1px solid #3d4a5d;
-      border-radius: 8px;
-      padding: 12px 16px;
-      margin-bottom: 16px;
+      max-width: 1200px;
+      background: var(--bg-panel);
+      backdrop-filter: var(--backdrop-blur);
+      border: 1px solid var(--border-glass);
+      border-radius: 12px;
+      padding: 16px 22px;
+      margin-bottom: 20px;
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+      gap: 16px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
     }
 
     .selector-label-group {
       display: flex;
       flex-direction: column;
-      gap: 2px;
+      gap: 4px;
     }
 
     .selector-title {
-      font-size: 0.95rem;
+      font-size: 1.05rem;
       font-weight: 700;
       color: #ffffff;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .selector-desc {
-      font-size: 0.8rem;
-      color: var(--text-dim);
-    }
-
-    .selector-controls {
       display: flex;
       align-items: center;
       gap: 10px;
     }
 
-    #engine-select {
-      background: #111317;
-      color: #fff;
-      border: 2px solid var(--accent);
-      padding: 8px 14px;
-      border-radius: 6px;
-      font-size: 0.92rem;
-      font-weight: 700;
-      cursor: pointer;
-      outline: none;
-      min-width: 280px;
+    .selector-desc {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      max-width: 600px;
+      line-height: 1.4;
     }
 
-    #engine-select:focus {
-      border-color: #67b7e6;
-      box-shadow: 0 0 0 2px rgba(79, 163, 209, 0.3);
+    .selector-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    #engine-select {
+      background: #111318;
+      color: #fff;
+      border: 1px solid rgba(88, 166, 255, 0.4);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      min-width: 300px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    }
+
+    #engine-select:hover:not(:disabled) {
+      border-color: var(--accent);
+      box-shadow: 0 0 15px var(--accent-glow);
     }
 
     .elo-badge {
       display: inline-block;
-      padding: 3px 8px;
-      border-radius: 12px;
-      font-size: 0.78rem;
-      font-weight: bold;
-      background: #2b3648;
-      color: #a4cff0;
-      border: 1px solid #485c7b;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(88, 166, 255, 0.3);
     }
 
     .main-container {
       display: flex;
       flex-wrap: wrap;
-      gap: 20px;
+      gap: 24px;
       width: 100%;
-      max-width: 1060px;
+      max-width: 1200px;
       justify-content: center;
+      align-items: flex-start;
     }
 
     .board-wrapper {
@@ -152,18 +181,18 @@
     }
 
     #board {
-      width: 520px;
-      height: 520px;
+      width: 560px;
+      height: 560px;
       display: grid;
       grid-template-columns: repeat(8, 1fr);
       grid-template-rows: repeat(8, 1fr);
-      border-radius: 4px;
+      border-radius: 8px;
       overflow: hidden;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7), 0 0 0 1px var(--border-glass);
       cursor: pointer;
     }
 
-    @media (max-width: 600px) {
+    @media (max-width: 640px) {
       #board {
         width: 92vw;
         height: 92vw;
@@ -178,6 +207,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      transition: background-color 0.1s ease;
     }
 
     .square.light { background-color: var(--sq-light); }
@@ -190,26 +220,28 @@
       font-size: 11px;
       font-weight: 700;
       pointer-events: none;
+      opacity: 0.8;
     }
-    .coord.file { bottom: 2px; right: 4px; }
-    .coord.rank { top: 2px; left: 4px; }
+    .coord.file { bottom: 3px; right: 5px; }
+    .coord.rank { top: 3px; left: 5px; }
     .light .coord { color: var(--sq-dark); }
     .dark .coord { color: var(--sq-light); }
 
     .hint-dot {
       position: absolute;
-      width: 28%;
-      height: 28%;
+      width: 30%;
+      height: 30%;
       border-radius: 50%;
       background: var(--sq-move-dot);
       pointer-events: none;
       z-index: 5;
+      box-shadow: 0 0 8px rgba(0,0,0,0.3);
     }
 
     .hint-ring {
       position: absolute;
-      width: 80%;
-      height: 80%;
+      width: 82%;
+      height: 82%;
       border-radius: 50%;
       border: 5px solid var(--sq-move-dot);
       pointer-events: none;
@@ -217,14 +249,18 @@
     }
 
     .piece {
-      font-size: clamp(34px, 7vw, 48px);
+      font-size: clamp(38px, 7.5vw, 54px);
       line-height: 1;
       display: flex;
       align-items: center;
       justify-content: center;
       z-index: 3;
-      transition: transform 0.05s ease;
+      transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
       font-family: "Apple Symbols", "DejaVu Sans", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif;
+    }
+
+    .piece:hover {
+      transform: scale(1.06);
     }
 
     .piece.white-piece {
@@ -234,157 +270,193 @@
         0 -1px 0 #111,
         1px 0 0 #111,
         -1px 0 0 #111,
-        0 2px 5px rgba(0, 0, 0, 0.65);
-      filter: drop-shadow(0px 2px 2px rgba(0, 0, 0, 0.45));
+        0 4px 10px rgba(0, 0, 0, 0.8);
+      filter: drop-shadow(0px 3px 4px rgba(0, 0, 0, 0.6));
     }
 
     .piece.black-piece {
-      color: #1a1a1a;
+      color: #16181d;
       text-shadow:
-        0 1px 1px rgba(255, 255, 255, 0.4),
-        0 -1px 1px rgba(255, 255, 255, 0.4),
-        1px 0 1px rgba(255, 255, 255, 0.4),
-        -1px 0 1px rgba(255, 255, 255, 0.4);
-      filter: drop-shadow(0px 2px 3px rgba(0, 0, 0, 0.5));
+        0 1px 1px rgba(255, 255, 255, 0.5),
+        0 -1px 1px rgba(255, 255, 255, 0.5),
+        1px 0 1px rgba(255, 255, 255, 0.5),
+        -1px 0 1px rgba(255, 255, 255, 0.5);
+      filter: drop-shadow(0px 3px 5px rgba(0, 0, 0, 0.7));
     }
 
     .panel {
       flex: 1;
-      min-width: 320px;
-      max-width: 440px;
+      min-width: 340px;
+      max-width: 460px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 16px;
     }
 
     .card {
       background: var(--bg-panel);
-      padding: 14px 16px;
-      border-radius: 6px;
-      border: 1px solid #2e323b;
+      backdrop-filter: var(--backdrop-blur);
+      padding: 18px 20px;
+      border-radius: 12px;
+      border: 1px solid var(--border-glass);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
     }
 
     .status-badge {
       display: inline-block;
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 0.8rem;
-      font-weight: bold;
-      margin-bottom: 8px;
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+      letter-spacing: 0.3px;
     }
-    .status-loading { background: #6c5421; color: #ffebaa; }
-    .status-ready { background: #1f592f; color: #b7f0c4; }
-    .status-thinking { background: #1d4d73; color: #bfe3ff; }
+    .status-loading { background: rgba(235, 180, 50, 0.2); color: #fbe086; border: 1px solid rgba(235, 180, 50, 0.4); }
+    .status-ready { background: rgba(46, 160, 67, 0.2); color: #56d364; border: 1px solid rgba(46, 160, 67, 0.4); }
+    .status-thinking { background: rgba(88, 166, 255, 0.2); color: #79c0ff; border: 1px solid rgba(88, 166, 255, 0.4); }
 
     .eval-meter {
       display: flex;
       flex-direction: column;
-      gap: 4px;
-      margin-top: 6px;
+      gap: 6px;
+      margin-top: 8px;
     }
 
     .meter-bar {
-      height: 10px;
+      height: 12px;
       width: 100%;
-      background-color: #3f4450;
-      border-radius: 5px;
+      background-color: #2b313c;
+      border-radius: 6px;
       overflow: hidden;
       display: flex;
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.4);
     }
 
     #meter-white {
       height: 100%;
       width: 50%;
-      background: #e6e8eb;
-      transition: width 0.3s ease;
+      background: linear-gradient(90deg, #e6e8eb, #ffffff);
+      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     }
 
     .stats-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 6px 12px;
-      font-size: 0.85rem;
+      gap: 10px 16px;
+      font-size: 0.88rem;
       color: var(--text-dim);
-      margin-top: 6px;
+      margin-top: 10px;
     }
-    .stats-grid span { color: var(--text-main); font-weight: 500; }
+    .stats-grid span { color: var(--text-main); font-weight: 600; font-family: monospace; }
 
     .history-box {
-      height: 180px;
-      background: var(--bg-card);
-      border-radius: 4px;
-      padding: 8px 10px;
+      height: 200px;
+      background: rgba(15, 17, 22, 0.6);
+      border-radius: 8px;
+      padding: 10px 12px;
       overflow-y: auto;
       font-family: monospace;
-      font-size: 0.9rem;
+      font-size: 0.92rem;
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      gap: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.04);
     }
 
     .history-row {
       display: flex;
       color: var(--text-dim);
+      padding: 2px 4px;
+      border-radius: 4px;
     }
-    .history-idx { width: 38px; }
-    .history-move { width: 85px; color: var(--text-main); }
+    .history-row:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .history-idx { width: 42px; color: var(--text-dim); }
+    .history-move { width: 90px; color: var(--text-main); font-weight: bold; }
 
     .control-row {
       display: flex;
-      gap: 8px;
+      gap: 10px;
     }
 
     button, select {
       background: var(--bg-card);
-      border: 1px solid #3c414d;
+      border: 1px solid rgba(255, 255, 255, 0.1);
       color: var(--text-main);
-      padding: 8px 14px;
-      border-radius: 4px;
+      padding: 10px 16px;
+      border-radius: 8px;
       cursor: pointer;
       font-weight: 600;
-      font-size: 0.85rem;
-      transition: background 0.15s ease;
+      font-size: 0.88rem;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
     }
     button:hover:not(:disabled), select:hover:not(:disabled) {
-      background: #353942;
+      background: #323846;
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateY(-1px);
+    }
+    button:active:not(:disabled) {
+      transform: translateY(0);
     }
     button:disabled, select:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
 
+    #btn-new {
+      background: linear-gradient(135deg, #238636, #2ea043);
+      border-color: rgba(255,255,255,0.15);
+      color: #fff;
+    }
+    #btn-new:hover:not(:disabled) {
+      background: linear-gradient(135deg, #2ea043, #3fb950);
+      box-shadow: 0 0 15px rgba(46, 160, 67, 0.4);
+    }
+
     #promotion-modal {
       display: none;
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.65);
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
       z-index: 100;
       align-items: center;
       justify-content: center;
     }
     .promo-dialog {
       background: var(--bg-panel);
-      padding: 16px;
-      border-radius: 8px;
-      border: 1px solid #444;
+      padding: 24px;
+      border-radius: 14px;
+      border: 1px solid var(--border-glass);
       display: flex;
-      gap: 12px;
+      gap: 16px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.8);
+      animation: modalPop 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    @keyframes modalPop {
+      0% { transform: scale(0.9); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
     }
     .promo-choice {
-      width: 64px;
-      height: 64px;
+      width: 72px;
+      height: 72px;
       cursor: pointer;
-      border: 2px solid transparent;
-      border-radius: 6px;
+      border: 2px solid rgba(255,255,255,0.08);
+      border-radius: 10px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 42px;
-      background: rgba(255, 255, 255, 0.05);
+      font-size: 46px;
+      background: rgba(255, 255, 255, 0.03);
+      transition: all 0.2s ease;
     }
     .promo-choice:hover {
       border-color: var(--accent);
       background: var(--bg-card);
+      transform: scale(1.08);
+      box-shadow: 0 0 20px var(--accent-glow);
     }
   </style>
 </head>
@@ -393,24 +465,24 @@
   <header>
     <div>
       <h1>AlphaKnight Arena</h1>
-      <div class="subline">Tournament Chess Engines by Benjamin You</div>
+      <div class="subline">Chess Engine Suite by Benjamin You</div>
     </div>
     <div id="runtime-status" class="status-badge status-loading">Loading Pyodide &amp; python-chess...</div>
   </header>
 
-  <!-- Obvious Model Selection Menu -->
+  <!-- Interactive Model Selection Menu -->
   <div class="model-selector-bar">
     <div class="selector-label-group">
       <div class="selector-title">
-        <span>⚔️ Opponent Engine</span>
+        <span>⚔️ Select Opponent Engine</span>
         <span id="active-elo-badge" class="elo-badge">~1900 Elo</span>
       </div>
       <div class="selector-desc" id="engine-summary">
-        AlphaKnight Centrion: Full Journeyman evaluation, tapered endgame, and deep alpha-beta search.
+        AlphaKnight Centrion: Full positioning evaluation, tapered endgame, and deep alpha-beta search.
       </div>
     </div>
     <div class="selector-controls">
-      <label for="engine-select" style="font-size:0.85rem; font-weight:600; color:var(--text-dim);">Model:</label>
+      <label for="engine-select" style="font-size:0.88rem; font-weight:600; color:var(--text-dim);">AI Model:</label>
       <select id="engine-select" onchange="onEngineChanged()" disabled>
         <option value="centrion" selected>AlphaKnight Centrion (~1900 Elo)</option>
         <option value="templar">AlphaKnight Templar (~1700 Elo)</option>
@@ -429,8 +501,8 @@
     <div class="panel">
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: baseline;">
-          <strong>Engine Diagnostics</strong>
-          <span id="eval-label" style="font-family: monospace; font-size: 0.85rem; color: var(--accent);">0.00</span>
+          <strong style="font-size: 0.95rem;">Engine Diagnostics</strong>
+          <span id="eval-label" style="font-family: monospace; font-size: 0.95rem; color: var(--accent); font-weight: 700;">0.00</span>
         </div>
         <div class="eval-meter">
           <div class="meter-bar">
@@ -448,7 +520,7 @@
       </div>
 
       <div class="card">
-        <strong style="font-size: 0.9rem; margin-bottom: 6px; display: block;">Game Notation</strong>
+        <strong style="font-size: 0.95rem; margin-bottom: 8px; display: block;">Game Notation</strong>
         <div class="history-box" id="move-history"></div>
       </div>
 
@@ -460,9 +532,9 @@
             <option value="b">Play Black</option>
           </select>
           <select id="think-time" disabled>
-            <option value="1000">Blitz (1 s clock)</option>
-            <option value="5000" selected>Rapid (5 s clock)</option>
-            <option value="15000">Classical (15 s clock)</option>
+            <option value="1000">Blitz (1s)</option>
+            <option value="5000" selected>Rapid (5s)</option>
+            <option value="15000">Classical (15s)</option>
           </select>
         </div>
       </div>
@@ -484,16 +556,16 @@
         name: "AlphaKnight Centrion",
         shortName: "Centrion",
         elo: "~1900 Elo",
-        summary: "Current Version (~1900 Elo): Comprehensive tapered evaluation, piece-square tables, pawn phalanxes, king safety, SEE, killer/history heuristics, and aspiration search."
+        summary: "AlphaKnight Centrion (~1900 Elo): Comprehensive tapered evaluation, piece-square tables, pawn phalanxes, king safety, SEE, killer/history heuristics, and aspiration search."
       },
       templar: {
         name: "AlphaKnight Templar (AK 4)",
         shortName: "Templar",
         elo: "~1700 Elo",
-        summary: "AlphaKnight 4 (~1700 Elo): Standalone classical tournament engine featuring transposition tables, late-move reductions, null-move pruning, and king-safety evaluations."
+        summary: "AlphaKnight Templar (~1700 Elo): Standalone classical tournament engine featuring transposition tables, late-move reductions, null-move pruning, and king-safety evaluations."
       },
       paladin: {
-        name: "AlphaKnight Paladin (v3)",
+        name: "AlphaKnight Paladin (AK 3)",
         shortName: "Paladin",
         elo: "~1500 Elo",
         summary: "AlphaKnight Paladin (~1500 Elo): Tactical alpha-beta negamax engine with piece-square heuristics, MVV-LVA move ordering, and quiescence search."
@@ -505,7 +577,7 @@
         summary: "AlphaKnight 2 (~1200 Elo, Estimated): Fast iterative deepening search engine using positional heuristics and tactical opportunistic evaluation."
       },
       v0: {
-        name: "AlphaKnight v0 (AK Zip)",
+        name: "AlphaKnight v0 (AK 1)",
         shortName: "v0",
         elo: "~800 Elo",
         summary: "AlphaKnight v0 (~800 Elo, Estimated): The initial baseline engine utilizing greedy material balance calculations and immediate capture priorities."
@@ -662,7 +734,6 @@ def js_think(clock_ms):
       await switchEngine(key);
       select.disabled = false;
 
-      // Sync FEN to current game
       pyodide.globals.get("js_set_fen")(currentFen);
       const data = JSON.parse(pyodide.globals.get("js_get_board_state")());
       if (data.side !== playerColor && !data.is_draw && legalMoves.length > 0) {
@@ -3495,7 +3566,6 @@ def _evaluate(board: chess.Board) -> int:
         if sq in CENTER_SQUARES and p.piece_type in (chess.PAWN, chess.KNIGHT):
             v += 20
         mat += v if p.color == chess.WHITE else -v
-    # Slight randomized pruning noise characteristic of Trojan
     mat += random.randint(-5, 5)
     return mat if board.turn == chess.WHITE else -mat
 
@@ -3543,7 +3613,6 @@ class _EngineTrojan:
         self.limit = min(time_left_ms * 0.5 / 1000.0, 2.0)
 
         best = moves[0]
-        # Trojan uses depth 2-3 search
         for depth in [1, 2, 3]:
             cur_best = None
             alpha = -30000
@@ -3605,7 +3674,6 @@ class _EngineV0:
             return "0000"
         self.nodes = len(legal)
 
-        # 1. Immediate checkmate if available
         for m in legal:
             board.push(m)
             if board.is_checkmate():
@@ -3613,7 +3681,6 @@ class _EngineV0:
                 return m.uci()
             board.pop()
 
-        # 2. Greedy highest-value capture
         captures = [m for m in legal if board.is_capture(m)]
         if captures:
             captures.sort(
@@ -3622,7 +3689,6 @@ class _EngineV0:
             )
             return captures[0].uci()
 
-        # 3. Prefer central pawn pushes or development
         scored = []
         for m in legal:
             board.push(m)
