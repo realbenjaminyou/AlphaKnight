@@ -317,9 +317,9 @@
   <header>
     <div>
       <h1>AlphaKnight Paladin</h1>
-      <div class="version">By Benjamin You</div>
+      <div class="version">v2.0.1: Benjamin You</div>
     </div>
-    <div id="runtime-status" class="status-badge status-loading">Loading Pyodide &amp; python-chess...</div>
+    <div id="runtime-status" class="status-badge status-loading">Loading Pyodide runtime...</div>
   </header>
 
   <div class="main-container">
@@ -359,9 +359,9 @@
             <option value="b">Play Black</option>
           </select>
           <select id="think-time" disabled>
-            <option value="5000">Blitz (5 s clock)</option>
-            <option value="15000" selected>Rapid (15 s clock)</option>
-            <option value="60000">Classical (60 s clock)</option>
+            <option value="1000">Blitz (1 s clock)</option>
+            <option value="5000" selected>Rapid (5 s clock)</option>
+            <option value="15000">Classical (15 s clock)</option>
           </select>
         </div>
       </div>
@@ -394,77 +394,100 @@
     async function initPyodideRuntime() {
       try {
         pyodide = await loadPyodide();
-        statusEl.innerText = "Installing python-chess...";
-        await pyodide.loadPackage("micropip");
-        const micropip = pyodide.pyimport("micropip");
-        await micropip.install("chess");
-
-        statusEl.innerText = "Transpiling classical agent...";
+        statusEl.innerText = "Transpiling Python agent...";
         const agentScript = document.getElementById("agent-py-source").textContent;
         await pyodide.runPythonAsync(agentScript);
 
         await pyodide.runPythonAsync(`
 import json
-import chess
 
-current_board = chess.Board()
+current_pos = Position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 
 def js_set_fen(fen):
-    global current_board, _GAME_KEYS, _LAST_ROOT_PLY
-    current_board.set_fen(fen)
-    _GAME_KEYS.clear()
-    _LAST_ROOT_PLY = None
+    global current_pos
+    current_pos = Position(fen)
 
 def js_get_board_state():
     mailbox = [0] * 64
     for sq in range(64):
-        p = current_board.piece_at(sq)
-        if p:
-            val = p.piece_type
-            mailbox[sq] = val if p.color == chess.WHITE else -val
+        p = current_pos.piece_at[sq]
+        if p >= 0:
+            val = (p % 6) + 1
+            mailbox[sq] = val if p < 6 else -val
 
-    legal = [m.uci() for m in current_board.legal_moves]
+    legal = []
+    for mv in current_pos.generate_moves():
+        undo = current_pos.make_move(mv)
+        if undo is not None:
+            current_pos.unmake_move(mv, undo)
+            legal.append(move_to_uci(mv))
+
+    in_chk = current_pos.in_check()
+    is_draw = (
+        current_pos.halfmove >= 100
+        or current_pos.insufficient_material()
+        or (len(legal) == 0 and not in_chk)
+    )
+
     return json.dumps({
         "mailbox": mailbox,
-        "side": "w" if current_board.turn == chess.WHITE else "b",
-        "fen": current_board.fen(),
+        "side": "w" if current_pos.side == WHITE else "b",
         "legal": legal,
-        "is_draw": current_board.is_checkmate() == False and current_board.is_game_over(),
-        "in_check": current_board.is_check()
+        "is_draw": is_draw,
+        "in_check": in_chk
     })
 
 def js_make_move(uci_str):
-    try:
-        mv = chess.Move.from_uci(uci_str)
-        if mv in current_board.legal_moves:
-            current_board.push(mv)
-            return True
-    except:
-        pass
+    for mv in current_pos.generate_moves():
+        if move_to_uci(mv) == uci_str:
+            undo = current_pos.make_move(mv)
+            if undo is not None:
+                return True
     return False
 
 def js_think(clock_ms):
-    fen_str = current_board.fen()
-    start_ns = time.perf_counter_ns()
-    best_move_uci = get_move(fen_str, clock_ms)
-    elapsed_ms = max(1, int((time.perf_counter_ns() - start_ns) / 1_000_000))
+    fen_ranks = []
+    for r in range(7, -1, -1):
+        empty = 0
+        rank_str = ""
+        for f in range(8):
+            sq = r * 8 + f
+            p = current_pos.piece_at[sq]
+            if p < 0:
+                empty += 1
+            else:
+                if empty:
+                    rank_str += str(empty)
+                    empty = 0
+                rank_str += "PNBRQKpnbrqk"[p]
+        if empty:
+            rank_str += str(empty)
+        fen_ranks.append(rank_str)
 
-    key = _position_key(current_board)
-    tt_k = _tt_key(current_board, key)
-    entry = _TT[tt_k & TT_MASK]
+    rights = ""
+    if current_pos.castling & CASTLE_WK: rights += "K"
+    if current_pos.castling & CASTLE_WQ: rights += "Q"
+    if current_pos.castling & CASTLE_BK: rights += "k"
+    if current_pos.castling & CASTLE_BQ: rights += "q"
+    if not rights: rights = "-"
 
-    if entry is not None and entry.key == tt_k:
-        score = _score_from_tt(entry.score, 0)
-        depth = entry.depth
-    else:
-        score = _evaluate(current_board)
-        depth = 1
+    ep = "-" if current_pos.ep_square < 0 else SQUARE_NAME[current_pos.ep_square]
+    stm = "w" if current_pos.side == WHITE else "b"
+    fen = f"{'/'.join(fen_ranks)} {stm} {rights} {ep} {current_pos.halfmove} 1"
+
+    start = time.perf_counter()
+    best_uci = get_move(fen, clock_ms)
+    elapsed_ms = max(1, int((time.perf_counter() - start) * 1000))
+
+    score = _ENGINE.root_score
+    if current_pos.side == BLACK:
+        score = -score
 
     return json.dumps({
-        "move": best_move_uci,
+        "move": best_uci,
         "score": score,
-        "depth": depth,
-        "nodes": 0,
+        "depth": getattr(_ENGINE, "root_depth", 1),
+        "nodes": _ENGINE.nodes,
         "time": elapsed_ms
     })
         `);
@@ -488,7 +511,6 @@ def js_think(clock_ms):
       const data = JSON.parse(pyodide.globals.get("js_get_board_state")());
       boardMailbox = data.mailbox;
       legalMoves = data.legal;
-      currentFen = data.fen;
       renderBoard();
 
       if (data.side !== playerColor && !data.is_draw && legalMoves.length > 0) {
@@ -664,7 +686,7 @@ def js_think(clock_ms):
       document.getElementById("stat-depth").innerText = info.depth;
       document.getElementById("stat-nodes").innerText = info.nodes.toLocaleString();
       document.getElementById("stat-time").innerText = `${info.time} ms`;
-      const knps = info.time > 0 && info.nodes > 0 ? (info.nodes / info.time).toFixed(1) : "-";
+      const knps = info.time > 0 ? (info.nodes / info.time).toFixed(1) : "0.0";
       document.getElementById("stat-nps").innerText = `${knps} kn/s`;
 
       let cp = info.score;
@@ -734,1114 +756,1618 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Final
 
-import chess
+WHITE = 0
+BLACK = 1
 
-INF: Final = 32_000
-MATE: Final = 30_000
-MATE_TT_THRESHOLD: Final = 29_000
-MAX_PLY: Final = 96
-TT_SIZE: Final = 1 << 18
-TT_MASK: Final = TT_SIZE - 1
-EXACT: Final = 0
-LOWER: Final = 1
-UPPER: Final = 2
+PAWN = 0
+KNIGHT = 1
+BISHOP = 2
+ROOK = 3
+QUEEN = 4
+KING = 5
+NO_CAPTURE = 7
 
-PIECE_VALUE: Final[tuple[int, ...]] = (0, 100, 320, 335, 500, 900, 0)
-CENTER_FILES: Final = (3, 4)
-CORE_SQUARES: Final = (27, 28, 35, 36)
-CORE_MASK: Final = sum(1 << square for square in CORE_SQUARES)
-EXTENDED_CENTER_MASK: Final = sum(
-    1 << (rank * 8 + file_index)
+PROMO_NONE = 0
+PROMO_KNIGHT = 1
+PROMO_BISHOP = 2
+PROMO_ROOK = 3
+PROMO_QUEEN = 4
+
+FLAG_EP = 1 << 21
+FLAG_CASTLE = 1 << 22
+FLAG_DOUBLE = 1 << 23
+
+CASTLE_WK = 1
+CASTLE_WQ = 2
+CASTLE_BK = 4
+CASTLE_BQ = 8
+
+TT_EXACT = 1
+TT_LOWER = 2
+TT_UPPER = 3
+
+INF = 32_000
+MATE = 30_000
+MATE_THRESHOLD = 29_000
+MAX_PLY = 96
+MASK64 = (1 << 64) - 1
+
+PIECE_VALUE = (100, 320, 330, 500, 900, 20_000)
+NON_KING_VALUE = (100, 320, 330, 500, 900, 0)
+PHASE_VALUE = (0, 1, 1, 2, 4, 0)
+
+FILE_A = 0x0101010101010101
+FILE_H = FILE_A << 7
+RANK_1 = 0xFF
+RANK_2 = 0xFF << 8
+RANK_7 = 0xFF << 48
+RANK_8 = 0xFF << 56
+
+SQUARE_NAME = tuple(f"{chr(97 + file_)}{rank + 1}" for rank in range(8) for file_ in range(8))
+SQUARE_INDEX = {name: index for index, name in enumerate(SQUARE_NAME)}
+BIT = tuple(1 << square for square in range(64))
+FILE_MASK = tuple(FILE_A << file_ for file_ in range(8))
+RANK_MASK = tuple(0xFF << (8 * rank) for rank in range(8))
+ADJ_FILE_MASK = tuple(
+    (FILE_MASK[file_ - 1] if file_ > 0 else 0) | (FILE_MASK[file_ + 1] if file_ < 7 else 0)
+    for file_ in range(8)
+)
+
+CORE_CENTER = sum(BIT[SQUARE_INDEX[name]] for name in ("d4", "e4", "d5", "e5"))
+EXT_CENTER = sum(
+    BIT[rank * 8 + file_]
     for rank in range(2, 6)
-    for file_index in range(2, 6)
+    for file_ in range(2, 6)
+)
+CENTRAL_FILES = FILE_MASK[3] | FILE_MASK[4]
+
+START_MINOR = (
+    BIT[SQUARE_INDEX["b1"]]
+    | BIT[SQUARE_INDEX["c1"]]
+    | BIT[SQUARE_INDEX["f1"]]
+    | BIT[SQUARE_INDEX["g1"]],
+    BIT[SQUARE_INDEX["b8"]]
+    | BIT[SQUARE_INDEX["c8"]]
+    | BIT[SQUARE_INDEX["f8"]]
+    | BIT[SQUARE_INDEX["g8"]],
+)
+START_KNIGHTS = (
+    BIT[SQUARE_INDEX["b1"]] | BIT[SQUARE_INDEX["g1"]],
+    BIT[SQUARE_INDEX["b8"]] | BIT[SQUARE_INDEX["g8"]],
+)
+START_BISHOPS = (
+    BIT[SQUARE_INDEX["c1"]] | BIT[SQUARE_INDEX["f1"]],
+    BIT[SQUARE_INDEX["c8"]] | BIT[SQUARE_INDEX["f8"]],
+)
+CASTLED_KING = (
+    BIT[SQUARE_INDEX["c1"]] | BIT[SQUARE_INDEX["g1"]],
+    BIT[SQUARE_INDEX["c8"]] | BIT[SQUARE_INDEX["g8"]],
 )
 
-
-def _make_file_masks() -> tuple[int, ...]:
-    return tuple(sum(1 << (rank * 8 + file_index) for rank in range(8)) for file_index in range(8))
-
-
-FILE_MASKS: Final[tuple[int, ...]] = _make_file_masks()
-ADJACENT_FILE_MASKS: Final[tuple[int, ...]] = tuple(
-    (FILE_MASKS[file_index - 1] if file_index > 0 else 0)
-    | (FILE_MASKS[file_index + 1] if file_index < 7 else 0)
-    for file_index in range(8)
-)
+KNIGHT_DELTAS = ((1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2))
+KING_DELTAS = ((1, 1), (1, 0), (1, -1), (0, 1), (0, -1), (-1, 1), (-1, 0), (-1, -1))
+ROOK_DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+BISHOP_DIRS = ((1, 1), (1, -1), (-1, 1), (-1, -1))
+ALL_DIRS = ROOK_DIRS + BISHOP_DIRS
 
 
-def _make_knight_attacks() -> tuple[int, ...]:
-    result: list[int] = []
-    for square in range(64):
-        file_index = square & 7
-        rank = square >> 3
-        mask = 0
-        for df, dr in ((1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2)):
-            nf = file_index + df
-            nr = rank + dr
-            if 0 <= nf < 8 and 0 <= nr < 8:
-                mask |= 1 << (nr * 8 + nf)
-        result.append(mask)
-    return tuple(result)
-
-
-def _make_king_attacks() -> tuple[int, ...]:
-    result: list[int] = []
-    for square in range(64):
-        file_index = square & 7
-        rank = square >> 3
-        mask = 0
-        for df in (-1, 0, 1):
-            for dr in (-1, 0, 1):
-                if df == 0 and dr == 0:
-                    continue
-                nf = file_index + df
-                nr = rank + dr
-                if 0 <= nf < 8 and 0 <= nr < 8:
-                    mask |= 1 << (nr * 8 + nf)
-        result.append(mask)
-    return tuple(result)
-
-
-def _make_pawn_attacks() -> tuple[tuple[int, ...], tuple[int, ...]]:
-    by_color: list[tuple[int, ...]] = []
-    for color in (chess.BLACK, chess.WHITE):
-        values: list[int] = []
-        step = 1 if color == chess.WHITE else -1
-        for square in range(64):
-            file_index = square & 7
-            rank = square >> 3
-            mask = 0
-            nr = rank + step
-            if 0 <= nr < 8:
-                if file_index > 0:
-                    mask |= 1 << (nr * 8 + file_index - 1)
-                if file_index < 7:
-                    mask |= 1 << (nr * 8 + file_index + 1)
-            values.append(mask)
-        by_color.append(tuple(values))
-    return by_color[0], by_color[1]
-
-
-def _make_passed_masks() -> tuple[tuple[int, ...], tuple[int, ...]]:
-    by_color: list[tuple[int, ...]] = []
-    for color in (chess.BLACK, chess.WHITE):
-        values: list[int] = []
-        for square in range(64):
-            file_index = square & 7
-            rank = square >> 3
-            mask = 0
-            ranks = range(rank + 1, 8) if color == chess.WHITE else range(rank - 1, -1, -1)
-            for nr in ranks:
-                for nf in (file_index - 1, file_index, file_index + 1):
-                    if 0 <= nf < 8:
-                        mask |= 1 << (nr * 8 + nf)
-            values.append(mask)
-        by_color.append(tuple(values))
-    return by_color[0], by_color[1]
-
-
-def _make_between() -> tuple[tuple[int, ...], ...]:
-    table: list[tuple[int, ...]] = []
-    for a in range(64):
-        row: list[int] = []
-        af = a & 7
-        ar = a >> 3
-        for b in range(64):
-            bf = b & 7
-            br = b >> 3
-            df = bf - af
-            dr = br - ar
-            if a == b:
-                row.append(0)
-                continue
-            if df == 0:
-                sf = 0
-                sr = 1 if dr > 0 else -1
-            elif dr == 0:
-                sf = 1 if df > 0 else -1
-                sr = 0
-            elif abs(df) == abs(dr):
-                sf = 1 if df > 0 else -1
-                sr = 1 if dr > 0 else -1
-            else:
-                row.append(0)
-                continue
-            nf = af + sf
-            nr = ar + sr
-            mask = 0
-            while (nf, nr) != (bf, br):
-                mask |= 1 << (nr * 8 + nf)
-                nf += sf
-                nr += sr
-            row.append(mask)
-        table.append(tuple(row))
-    return tuple(table)
-
-
-KNIGHT_ATTACKS: Final[tuple[int, ...]] = _make_knight_attacks()
-KING_ATTACKS: Final[tuple[int, ...]] = _make_king_attacks()
-PAWN_ATTACKS: Final[tuple[tuple[int, ...], tuple[int, ...]]] = _make_pawn_attacks()
-PASSED_MASKS: Final[tuple[tuple[int, ...], tuple[int, ...]]] = _make_passed_masks()
-BETWEEN: Final[tuple[tuple[int, ...], ...]] = _make_between()
-KING_ZONE: Final[tuple[int, ...]] = tuple(
-    KING_ATTACKS[square] | (1 << square) for square in range(64)
-)
-
-
-def _center_score(square: int) -> int:
-    file_index = square & 7
+def _jump_attacks(square: int, deltas: tuple[tuple[int, int], ...]) -> int:
+    file_ = square & 7
     rank = square >> 3
-    distance = abs(file_index - 3.5) + abs(rank - 3.5)
-    return int(round(18 - 4 * distance))
+    attacks = 0
+    for df, dr in deltas:
+        target_file = file_ + df
+        target_rank = rank + dr
+        if 0 <= target_file < 8 and 0 <= target_rank < 8:
+            attacks |= BIT[target_rank * 8 + target_file]
+    return attacks
 
 
-CENTER_SCORE: Final[tuple[int, ...]] = tuple(_center_score(square) for square in range(64))
+KNIGHT_ATTACKS = tuple(_jump_attacks(square, KNIGHT_DELTAS) for square in range(64))
+KING_ATTACKS = tuple(_jump_attacks(square, KING_DELTAS) for square in range(64))
 
 
-def _make_pst() -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]:
-    all_colors: list[tuple[tuple[int, ...], ...]] = []
-    for color in (chess.BLACK, chess.WHITE):
-        per_piece: list[tuple[int, ...]] = [tuple(0 for _ in range(64))]
-        for piece_type in range(chess.PAWN, chess.KING + 1):
-            values: list[int] = []
-            for square in range(64):
-                file_index = square & 7
-                rank = square >> 3
-                rel_rank = rank if color == chess.WHITE else 7 - rank
-                center = CENTER_SCORE[square]
-                if piece_type == chess.PAWN:
-                    value = rel_rank * 4 + max(0, center // 4)
-                elif piece_type == chess.KNIGHT:
-                    value = center * 2
-                elif piece_type == chess.BISHOP:
-                    value = center + rel_rank * 2
-                elif piece_type == chess.ROOK:
-                    value = rel_rank * 2 + (5 if file_index in CENTER_FILES else 0)
-                elif piece_type == chess.QUEEN:
-                    value = center // 2
-                else:
-                    edge = min(file_index, 7 - file_index)
-                    value = -center + edge * 2
-                values.append(value)
-            per_piece.append(tuple(values))
-        all_colors.append(tuple(per_piece))
-    return all_colors[0], all_colors[1]
+def _pawn_attacks(side: int, square: int) -> int:
+    file_ = square & 7
+    rank = square >> 3
+    target_rank = rank + (1 if side == WHITE else -1)
+    if not 0 <= target_rank < 8:
+        return 0
+    attacks = 0
+    if file_ > 0:
+        attacks |= BIT[target_rank * 8 + file_ - 1]
+    if file_ < 7:
+        attacks |= BIT[target_rank * 8 + file_ + 1]
+    return attacks
 
 
-PST: Final[tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]] = _make_pst()
-
-WHITE_HOME_MINORS: Final = (1 << chess.B1) | (1 << chess.C1) | (1 << chess.F1) | (1 << chess.G1)
-BLACK_HOME_MINORS: Final = (1 << chess.B8) | (1 << chess.C8) | (1 << chess.F8) | (1 << chess.G8)
-CASTLED_SQUARES: Final[tuple[tuple[int, ...], tuple[int, ...]]] = (
-    (chess.C8, chess.G8),
-    (chess.C1, chess.G1),
+PAWN_ATTACKS = (
+    tuple(_pawn_attacks(WHITE, square) for square in range(64)),
+    tuple(_pawn_attacks(BLACK, square) for square in range(64)),
 )
-START_QUEEN: Final[tuple[int, int]] = (chess.D8, chess.D1)
-START_KING: Final[tuple[int, int]] = (chess.E8, chess.E1)
+
+
+def _slow_slider_attacks(
+    square: int, occupied: int, directions: tuple[tuple[int, int], ...]
+) -> int:
+    file_ = square & 7
+    rank = square >> 3
+    attacks = 0
+    for df, dr in directions:
+        target_file = file_ + df
+        target_rank = rank + dr
+        while 0 <= target_file < 8 and 0 <= target_rank < 8:
+            target = target_rank * 8 + target_file
+            attacks |= BIT[target]
+            if occupied & BIT[target]:
+                break
+            target_file += df
+            target_rank += dr
+    return attacks
+
+
+def _slider_mask(square: int, directions: tuple[tuple[int, int], ...]) -> int:
+    file_ = square & 7
+    rank = square >> 3
+    mask = 0
+    for df, dr in directions:
+        target_file = file_ + df
+        target_rank = rank + dr
+        while 0 <= target_file < 8 and 0 <= target_rank < 8:
+            next_file = target_file + df
+            next_rank = target_rank + dr
+            if not (0 <= next_file < 8 and 0 <= next_rank < 8):
+                break
+            mask |= BIT[target_rank * 8 + target_file]
+            target_file = next_file
+            target_rank = next_rank
+    return mask
+
+
+def _build_slider_tables(
+    directions: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, ...], tuple[dict[int, int], ...]]:
+    masks: list[int] = []
+    tables: list[dict[int, int]] = []
+    for square in range(64):
+        mask = _slider_mask(square, directions)
+        table: dict[int, int] = {}
+        subset = 0
+        while True:
+            table[subset] = _slow_slider_attacks(square, subset, directions)
+            if subset == mask:
+                break
+            subset = (subset - mask) & mask
+        masks.append(mask)
+        tables.append(table)
+    return tuple(masks), tuple(tables)
+
+
+ROOK_MASK, ROOK_TABLE = _build_slider_tables(ROOK_DIRS)
+BISHOP_MASK, BISHOP_TABLE = _build_slider_tables(BISHOP_DIRS)
+
+
+def rook_attacks(square: int, occupied: int) -> int:
+    return ROOK_TABLE[square][occupied & ROOK_MASK[square]]
+
+
+def bishop_attacks(square: int, occupied: int) -> int:
+    return BISHOP_TABLE[square][occupied & BISHOP_MASK[square]]
+
+
+def _between(square_a: int, square_b: int) -> int:
+    file_a = square_a & 7
+    rank_a = square_a >> 3
+    file_b = square_b & 7
+    rank_b = square_b >> 3
+    df = (file_b > file_a) - (file_b < file_a)
+    dr = (rank_b > rank_a) - (rank_b < rank_a)
+    if not (file_a == file_b or rank_a == rank_b or abs(file_b - file_a) == abs(rank_b - rank_a)):
+        return 0
+    mask = 0
+    file_ = file_a + df
+    rank = rank_a + dr
+    while (file_, rank) != (file_b, rank_b):
+        mask |= BIT[rank * 8 + file_]
+        file_ += df
+        rank += dr
+    return mask
+
+
+BETWEEN = tuple(tuple(_between(a, b) for b in range(64)) for a in range(64))
+
+
+def _passed_mask(side: int, square: int) -> int:
+    file_ = square & 7
+    rank = square >> 3
+    mask = 0
+    rank_range = range(rank + 1, 8) if side == WHITE else range(rank - 1, -1, -1)
+    for target_rank in rank_range:
+        for target_file in range(max(0, file_ - 1), min(7, file_ + 1) + 1):
+            mask |= BIT[target_rank * 8 + target_file]
+    return mask
+
+
+PASSED_MASK = (
+    tuple(_passed_mask(WHITE, square) for square in range(64)),
+    tuple(_passed_mask(BLACK, square) for square in range(64)),
+)
+
+
+def _king_zone(square: int) -> int:
+    zone = KING_ATTACKS[square] | BIT[square]
+    outer = zone
+    work = zone
+    while work:
+        lsb = work & -work
+        target = lsb.bit_length() - 1
+        outer |= KING_ATTACKS[target]
+        work ^= lsb
+    return outer
+
+
+KING_ZONE = tuple(_king_zone(square) for square in range(64))
+
+
+def _central_score(square: int) -> int:
+    file_ = square & 7
+    rank = square >> 3
+    distance = abs(file_ * 2 - 7) + abs(rank * 2 - 7)
+    score = max(0, 18 - 2 * distance)
+    if BIT[square] & CORE_CENTER:
+        score += 16
+    elif BIT[square] & EXT_CENTER:
+        score += 7
+    return score
+
+
+CENTRAL_SCORE = tuple(_central_score(square) for square in range(64))
+
+
+def _piece_square_tables() -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, ...], ...]]:
+    mg: list[list[int]] = [[0] * 64 for _ in range(6)]
+    eg: list[list[int]] = [[0] * 64 for _ in range(6)]
+    for square in range(64):
+        file_ = square & 7
+        rank = square >> 3
+        center = CENTRAL_SCORE[square]
+        edge = int(file_ in (0, 7)) + int(rank in (0, 7))
+        mg[PAWN][square] = (
+            rank * 7
+            + (8 if BIT[square] & CORE_CENTER else 0)
+            - 2 * abs(file_ * 2 - 7)
+        )
+        eg[PAWN][square] = rank * 12 + center // 3
+        mg[KNIGHT][square] = center * 2 - edge * 18
+        eg[KNIGHT][square] = center + 4
+        mg[BISHOP][square] = center + 6 - edge * 5
+        eg[BISHOP][square] = center + 8
+        mg[ROOK][square] = rank * 2 + (7 if file_ in (3, 4) else 0)
+        eg[ROOK][square] = center // 3 + rank * 2
+        mg[QUEEN][square] = center // 2 - (5 if rank > 3 else 0)
+        eg[QUEEN][square] = center
+        mg[KING][square] = -center * 2 - rank * 4
+        eg[KING][square] = center * 2
+    return tuple(tuple(row) for row in mg), tuple(tuple(row) for row in eg)
+
+
+PST_MG, PST_EG = _piece_square_tables()
 
 
 def _splitmix64(seed: int) -> int:
-    value = (seed + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
-    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9 & 0xFFFFFFFFFFFFFFFF
-    value = (value ^ (value >> 27)) * 0x94D049BB133111EB & 0xFFFFFFFFFFFFFFFF
+    value = (seed + 0x9E3779B97F4A7C15) & MASK64
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & MASK64
     return value ^ (value >> 31)
 
 
-def _make_zobrist(count: int, seed: int) -> tuple[int, ...]:
+def _zobrist_values(count: int) -> tuple[int, ...]:
     values: list[int] = []
-    value = seed
+    seed = 0xC4A5B1A2D39E7F61
     for _ in range(count):
-        value = _splitmix64(value)
-        values.append(value)
+        seed = _splitmix64(seed)
+        values.append(seed)
     return tuple(values)
 
 
-Z_PIECES: Final[tuple[int, ...]] = _make_zobrist(12 * 64, 0xC0FFEE1234)
-Z_CASTLING: Final[tuple[int, ...]] = _make_zobrist(64, 0x123456789AB)
-Z_EP: Final[tuple[int, ...]] = _make_zobrist(8, 0xA51CE55)
-Z_TURN: Final = _splitmix64(0xDEADBEEF)
-Z_HALFMOVE: Final[tuple[int, ...]] = _make_zobrist(101, 0xF17ECAFE)
+_Z_VALUES = _zobrist_values(12 * 64 + 16 + 8 + 1)
+Z_PIECE = tuple(
+    tuple(_Z_VALUES[piece * 64 + square] for square in range(64))
+    for piece in range(12)
+)
+_Z_OFFSET = 12 * 64
+Z_CASTLE = tuple(_Z_VALUES[_Z_OFFSET + rights] for rights in range(16))
+Z_EP = tuple(_Z_VALUES[_Z_OFFSET + 16 + file_] for file_ in range(8))
+Z_SIDE = _Z_VALUES[-1]
+
+LMR_TABLE = tuple(
+    tuple(
+        0
+        if depth < 3 or move_count < 3
+        else max(1, int((depth.bit_length() - 1) * (move_count.bit_length() - 1) / 2.2))
+        for move_count in range(65)
+    )
+    for depth in range(65)
+)
 
 
 @dataclass(slots=True)
-class _TTEntry:
-    key: int
-    depth: int
-    score: int
-    flag: int
-    move: chess.Move | None
-    static_eval: int
-    age: int
+class Undo:
+    castling: int
+    ep_square: int
+    halfmove: int
+    hash_key: int
 
 
-_TT: list[_TTEntry | None] = [None] * TT_SIZE
-_TT_AGE = 0
-_HISTORY: list[list[list[int]]] = [[[0 for _ in range(64)] for _ in range(64)] for _ in range(2)]
-_KILLERS: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY)]
-_COUNTERS: list[chess.Move | None] = [None] * 4096
-_GAME_KEYS: list[int] = []
-_LAST_ROOT_PLY: int | None = None
+class Position:
+    __slots__ = (
+        "pieces",
+        "piece_at",
+        "occ",
+        "side",
+        "castling",
+        "ep_square",
+        "halfmove",
+        "hash_key",
+    )
 
+    def __init__(self, fen: str) -> None:
+        self.pieces = [0] * 12
+        self.piece_at = [-1] * 64
+        self.occ = [0, 0]
+        self.side = WHITE
+        self.castling = 0
+        self.ep_square = -1
+        self.halfmove = 0
+        self.hash_key = 0
+        self._parse_fen(fen)
 
-class _SearchTimeout(Exception):
-    pass
-
-
-def _bits(mask: int) -> list[int]:
-    squares: list[int] = []
-    while mask:
-        lsb = mask & -mask
-        squares.append(lsb.bit_length() - 1)
-        mask ^= lsb
-    return squares
-
-
-def _position_key(board: chess.Board) -> int:
-    key = 0
-    for color in (chess.BLACK, chess.WHITE):
-        occupied = board.occupied_co[color]
-        color_index = 1 if color == chess.WHITE else 0
-        piece_masks = (
-            board.pawns,
-            board.knights,
-            board.bishops,
-            board.rooks,
-            board.queens,
-            board.kings,
+    def _parse_fen(self, fen: str) -> None:
+        fields = fen.split()
+        if len(fields) < 4:
+            raise ValueError("invalid FEN")
+        piece_map = {
+            "P": 0,
+            "N": 1,
+            "B": 2,
+            "R": 3,
+            "Q": 4,
+            "K": 5,
+            "p": 6,
+            "n": 7,
+            "b": 8,
+            "r": 9,
+            "q": 10,
+            "k": 11,
+        }
+        ranks = fields[0].split("/")
+        if len(ranks) != 8:
+            raise ValueError("invalid FEN board")
+        for fen_rank, text in enumerate(ranks):
+            board_rank = 7 - fen_rank
+            file_ = 0
+            for char in text:
+                if char.isdigit():
+                    file_ += int(char)
+                    continue
+                piece = piece_map.get(char)
+                if piece is None or file_ >= 8:
+                    raise ValueError("invalid FEN piece placement")
+                square = board_rank * 8 + file_
+                self.pieces[piece] |= BIT[square]
+                self.piece_at[square] = piece
+                self.occ[piece // 6] |= BIT[square]
+                file_ += 1
+            if file_ != 8:
+                raise ValueError("invalid FEN rank")
+        self.side = WHITE if fields[1] == "w" else BLACK
+        rights = fields[2]
+        self.castling = (
+            (CASTLE_WK if "K" in rights else 0)
+            | (CASTLE_WQ if "Q" in rights else 0)
+            | (CASTLE_BK if "k" in rights else 0)
+            | (CASTLE_BQ if "q" in rights else 0)
         )
-        for piece_offset, piece_mask in enumerate(piece_masks):
-            mask = piece_mask & occupied
-            base = (color_index * 6 + piece_offset) * 64
-            while mask:
-                lsb = mask & -mask
+        self.ep_square = -1 if fields[3] == "-" else SQUARE_INDEX.get(fields[3], -1)
+        self.halfmove = int(fields[4]) if len(fields) >= 5 else 0
+        self.hash_key = self._compute_hash()
+
+    def _compute_hash(self) -> int:
+        key = Z_CASTLE[self.castling]
+        for piece in range(12):
+            bitboard = self.pieces[piece]
+            while bitboard:
+                lsb = bitboard & -bitboard
                 square = lsb.bit_length() - 1
-                key ^= Z_PIECES[base + square]
-                mask ^= lsb
-    rights = board.castling_rights
-    while rights:
-        lsb = rights & -rights
-        square = lsb.bit_length() - 1
-        key ^= Z_CASTLING[square]
-        rights ^= lsb
-    if board.ep_square is not None:
-        key ^= Z_EP[board.ep_square & 7]
-    if board.turn == chess.BLACK:
-        key ^= Z_TURN
-    return key
+                key ^= Z_PIECE[piece][square]
+                bitboard ^= lsb
+        if self.ep_square >= 0:
+            key ^= Z_EP[self.ep_square & 7]
+        if self.side == BLACK:
+            key ^= Z_SIDE
+        return key & MASK64
+
+    def occupied(self) -> int:
+        return self.occ[WHITE] | self.occ[BLACK]
+
+    def king_square(self, side: int) -> int:
+        king = self.pieces[side * 6 + KING]
+        return king.bit_length() - 1
+
+    def in_check(self) -> bool:
+        return self.is_attacked(self.king_square(self.side), self.side ^ 1)
+
+    def is_attacked(self, square: int, by_side: int) -> bool:
+        occupied = self.occupied()
+        base = by_side * 6
+        if PAWN_ATTACKS[by_side ^ 1][square] & self.pieces[base + PAWN]:
+            return True
+        if KNIGHT_ATTACKS[square] & self.pieces[base + KNIGHT]:
+            return True
+        if KING_ATTACKS[square] & self.pieces[base + KING]:
+            return True
+        bishops_queens = self.pieces[base + BISHOP] | self.pieces[base + QUEEN]
+        if bishop_attacks(square, occupied) & bishops_queens:
+            return True
+        rooks_queens = self.pieces[base + ROOK] | self.pieces[base + QUEEN]
+        return bool(rook_attacks(square, occupied) & rooks_queens)
+
+    def least_attacker_value(self, square: int, by_side: int) -> int:
+        occupied = self.occupied()
+        base = by_side * 6
+        if PAWN_ATTACKS[by_side ^ 1][square] & self.pieces[base + PAWN]:
+            return PIECE_VALUE[PAWN]
+        if KNIGHT_ATTACKS[square] & self.pieces[base + KNIGHT]:
+            return PIECE_VALUE[KNIGHT]
+        if bishop_attacks(square, occupied) & self.pieces[base + BISHOP]:
+            return PIECE_VALUE[BISHOP]
+        if rook_attacks(square, occupied) & self.pieces[base + ROOK]:
+            return PIECE_VALUE[ROOK]
+        queen_attacks = bishop_attacks(square, occupied) | rook_attacks(square, occupied)
+        if queen_attacks & self.pieces[base + QUEEN]:
+            return PIECE_VALUE[QUEEN]
+        if KING_ATTACKS[square] & self.pieces[base + KING]:
+            return PIECE_VALUE[KING]
+        return INF
+
+    def generate_moves(self, tactical: bool = False) -> list[int]:
+        moves: list[int] = []
+        side = self.side
+        opponent = side ^ 1
+        own = self.occ[side]
+        enemy = self.occ[opponent]
+        occupied = own | enemy
+        base = side * 6
+        pawns = self.pieces[base + PAWN]
+
+        if side == WHITE:
+            capture_left = ((pawns & ~FILE_A) << 7) & enemy
+            capture_right = ((pawns & ~FILE_H) << 9) & enemy
+            self._append_pawn_captures(moves, capture_left, -7, side)
+            self._append_pawn_captures(moves, capture_right, -9, side)
+            if self.ep_square >= 0:
+                ep_bit = BIT[self.ep_square]
+                ep_attackers = PAWN_ATTACKS[BLACK][self.ep_square] & pawns
+                while ep_attackers:
+                    lsb = ep_attackers & -ep_attackers
+                    from_square = lsb.bit_length() - 1
+                    moves.append(
+                        encode_move(from_square, self.ep_square, PAWN, PAWN, PROMO_NONE, FLAG_EP)
+                    )
+                    ep_attackers ^= lsb
+            one = (pawns << 8) & ~occupied & MASK64
+            promotions = one & RANK_8
+            self._append_pawn_promotions(moves, promotions, -8, NO_CAPTURE, tactical)
+            if not tactical:
+                quiet = one & ~RANK_8
+                work = quiet
+                while work:
+                    lsb = work & -work
+                    to_square = lsb.bit_length() - 1
+                    moves.append(encode_move(to_square - 8, to_square, PAWN))
+                    work ^= lsb
+                doubles = (((pawns & RANK_2) << 8) & ~occupied) << 8
+                doubles &= ~occupied & RANK_MASK[3]
+                work = doubles
+                while work:
+                    lsb = work & -work
+                    to_square = lsb.bit_length() - 1
+                    moves.append(encode_move(to_square - 16, to_square, PAWN, flags=FLAG_DOUBLE))
+                    work ^= lsb
+        else:
+            capture_left = ((pawns & ~FILE_A) >> 9) & enemy
+            capture_right = ((pawns & ~FILE_H) >> 7) & enemy
+            self._append_pawn_captures(moves, capture_left, 9, side)
+            self._append_pawn_captures(moves, capture_right, 7, side)
+            if self.ep_square >= 0:
+                ep_attackers = PAWN_ATTACKS[WHITE][self.ep_square] & pawns
+                while ep_attackers:
+                    lsb = ep_attackers & -ep_attackers
+                    from_square = lsb.bit_length() - 1
+                    moves.append(
+                        encode_move(from_square, self.ep_square, PAWN, PAWN, PROMO_NONE, FLAG_EP)
+                    )
+                    ep_attackers ^= lsb
+            one = (pawns >> 8) & ~occupied
+            promotions = one & RANK_1
+            self._append_pawn_promotions(moves, promotions, 8, NO_CAPTURE, tactical)
+            if not tactical:
+                quiet = one & ~RANK_1
+                work = quiet
+                while work:
+                    lsb = work & -work
+                    to_square = lsb.bit_length() - 1
+                    moves.append(encode_move(to_square + 8, to_square, PAWN))
+                    work ^= lsb
+                doubles = (((pawns & RANK_7) >> 8) & ~occupied) >> 8
+                doubles &= ~occupied & RANK_MASK[4]
+                work = doubles
+                while work:
+                    lsb = work & -work
+                    to_square = lsb.bit_length() - 1
+                    moves.append(encode_move(to_square + 16, to_square, PAWN, flags=FLAG_DOUBLE))
+                    work ^= lsb
+
+        self._append_piece_moves(moves, KNIGHT, KNIGHT_ATTACKS, own, enemy, tactical)
+        self._append_slider_moves(moves, BISHOP, own, enemy, occupied, tactical)
+        self._append_slider_moves(moves, ROOK, own, enemy, occupied, tactical)
+        self._append_slider_moves(moves, QUEEN, own, enemy, occupied, tactical)
+
+        kings = self.pieces[base + KING]
+        if kings:
+            from_square = kings.bit_length() - 1
+            targets = KING_ATTACKS[from_square] & (enemy if tactical else ~own & MASK64)
+            self._append_targets(moves, from_square, KING, targets, enemy)
+            if not tactical:
+                self._append_castles(moves, from_square)
+        return moves
+
+    def _append_pawn_captures(
+        self, moves: list[int], targets: int, from_delta: int, side: int
+    ) -> None:
+        promotion_rank = RANK_8 if side == WHITE else RANK_1
+        work = targets
+        while work:
+            lsb = work & -work
+            to_square = lsb.bit_length() - 1
+            from_square = to_square + from_delta
+            victim = self.piece_at[to_square]
+            if victim < 0:
+                work ^= lsb
+                continue
+            captured = victim % 6
+            if lsb & promotion_rank:
+                for promotion in (PROMO_QUEEN, PROMO_ROOK, PROMO_BISHOP, PROMO_KNIGHT):
+                    moves.append(encode_move(from_square, to_square, PAWN, captured, promotion))
+            else:
+                moves.append(encode_move(from_square, to_square, PAWN, captured))
+            work ^= lsb
+
+    def _append_pawn_promotions(
+        self,
+        moves: list[int],
+        targets: int,
+        from_delta: int,
+        captured: int,
+        tactical: bool,
+    ) -> None:
+        work = targets
+        while work:
+            lsb = work & -work
+            to_square = lsb.bit_length() - 1
+            from_square = to_square + from_delta
+            if tactical:
+                moves.append(encode_move(from_square, to_square, PAWN, captured, PROMO_QUEEN))
+            else:
+                for promotion in (PROMO_QUEEN, PROMO_ROOK, PROMO_BISHOP, PROMO_KNIGHT):
+                    moves.append(encode_move(from_square, to_square, PAWN, captured, promotion))
+            work ^= lsb
+
+    def _append_piece_moves(
+        self,
+        moves: list[int],
+        piece_type: int,
+        attack_table: tuple[int, ...],
+        own: int,
+        enemy: int,
+        tactical: bool,
+    ) -> None:
+        pieces = self.pieces[self.side * 6 + piece_type]
+        while pieces:
+            lsb = pieces & -pieces
+            from_square = lsb.bit_length() - 1
+            targets = attack_table[from_square] & (enemy if tactical else ~own & MASK64)
+            self._append_targets(moves, from_square, piece_type, targets, enemy)
+            pieces ^= lsb
+
+    def _append_slider_moves(
+        self,
+        moves: list[int],
+        piece_type: int,
+        own: int,
+        enemy: int,
+        occupied: int,
+        tactical: bool,
+    ) -> None:
+        pieces = self.pieces[self.side * 6 + piece_type]
+        while pieces:
+            lsb = pieces & -pieces
+            from_square = lsb.bit_length() - 1
+            if piece_type == BISHOP:
+                attacks = bishop_attacks(from_square, occupied)
+            elif piece_type == ROOK:
+                attacks = rook_attacks(from_square, occupied)
+            else:
+                attacks = (
+                    bishop_attacks(from_square, occupied)
+                    | rook_attacks(from_square, occupied)
+                )
+            targets = attacks & (enemy if tactical else ~own & MASK64)
+            self._append_targets(moves, from_square, piece_type, targets, enemy)
+            pieces ^= lsb
+
+    def _append_targets(
+        self, moves: list[int], from_square: int, piece_type: int, targets: int, enemy: int
+    ) -> None:
+        work = targets
+        while work:
+            lsb = work & -work
+            to_square = lsb.bit_length() - 1
+            captured = NO_CAPTURE
+            if lsb & enemy:
+                victim = self.piece_at[to_square]
+                if victim >= 0:
+                    captured = victim % 6
+            moves.append(encode_move(from_square, to_square, piece_type, captured))
+            work ^= lsb
+
+    def _append_castles(self, moves: list[int], king_square: int) -> None:
+        if self.side == WHITE and king_square == 4:
+            if (
+                self.castling & CASTLE_WK
+                and not (self.occupied() & (BIT[5] | BIT[6]))
+                and self.piece_at[7] == ROOK
+                and not self.is_attacked(4, BLACK)
+                and not self.is_attacked(5, BLACK)
+                and not self.is_attacked(6, BLACK)
+            ):
+                moves.append(encode_move(4, 6, KING, flags=FLAG_CASTLE))
+            if (
+                self.castling & CASTLE_WQ
+                and not (self.occupied() & (BIT[1] | BIT[2] | BIT[3]))
+                and self.piece_at[0] == ROOK
+                and not self.is_attacked(4, BLACK)
+                and not self.is_attacked(3, BLACK)
+                and not self.is_attacked(2, BLACK)
+            ):
+                moves.append(encode_move(4, 2, KING, flags=FLAG_CASTLE))
+        elif self.side == BLACK and king_square == 60:
+            if (
+                self.castling & CASTLE_BK
+                and not (self.occupied() & (BIT[61] | BIT[62]))
+                and self.piece_at[63] == 6 + ROOK
+                and not self.is_attacked(60, WHITE)
+                and not self.is_attacked(61, WHITE)
+                and not self.is_attacked(62, WHITE)
+            ):
+                moves.append(encode_move(60, 62, KING, flags=FLAG_CASTLE))
+            if (
+                self.castling & CASTLE_BQ
+                and not (self.occupied() & (BIT[57] | BIT[58] | BIT[59]))
+                and self.piece_at[56] == 6 + ROOK
+                and not self.is_attacked(60, WHITE)
+                and not self.is_attacked(59, WHITE)
+                and not self.is_attacked(58, WHITE)
+            ):
+                moves.append(encode_move(60, 58, KING, flags=FLAG_CASTLE))
+
+    def make_move(self, move: int) -> Undo | None:
+        from_square = move & 63
+        to_square = (move >> 6) & 63
+        piece_type = (move >> 12) & 7
+        captured = (move >> 15) & 7
+        promotion = (move >> 18) & 7
+        side = self.side
+        opponent = side ^ 1
+        piece_index = side * 6 + piece_type
+        from_bit = BIT[from_square]
+        to_bit = BIT[to_square]
+        if not self.pieces[piece_index] & from_bit:
+            return None
+        capture_square = to_square
+        if move & FLAG_EP:
+            capture_square = to_square - 8 if side == WHITE else to_square + 8
+            captured = PAWN
+        if captured != NO_CAPTURE:
+            captured_index = opponent * 6 + captured
+            capture_bit = BIT[capture_square]
+            if not self.pieces[captured_index] & capture_bit:
+                return None
+
+        undo = Undo(self.castling, self.ep_square, self.halfmove, self.hash_key)
+
+        if self.ep_square >= 0:
+            self.hash_key ^= Z_EP[self.ep_square & 7]
+        self.hash_key ^= Z_CASTLE[self.castling]
+        self.ep_square = -1
+
+        self.pieces[piece_index] ^= from_bit
+        self.occ[side] ^= from_bit
+        self.piece_at[from_square] = -1
+        self.hash_key ^= Z_PIECE[piece_index][from_square]
+
+        if captured != NO_CAPTURE:
+            captured_index = opponent * 6 + captured
+            capture_bit = BIT[capture_square]
+            self.pieces[captured_index] ^= capture_bit
+            self.occ[opponent] ^= capture_bit
+            self.piece_at[capture_square] = -1
+            self.hash_key ^= Z_PIECE[captured_index][capture_square]
+
+        placed_type = piece_type
+        if promotion:
+            placed_type = (KNIGHT, KNIGHT, BISHOP, ROOK, QUEEN)[promotion]
+        placed_index = side * 6 + placed_type
+        self.pieces[placed_index] |= to_bit
+        self.occ[side] |= to_bit
+        self.piece_at[to_square] = placed_index
+        self.hash_key ^= Z_PIECE[placed_index][to_square]
+
+        if move & FLAG_CASTLE:
+            if to_square == 6:
+                self._move_rook_for_castle(WHITE, 7, 5)
+            elif to_square == 2:
+                self._move_rook_for_castle(WHITE, 0, 3)
+            elif to_square == 62:
+                self._move_rook_for_castle(BLACK, 63, 61)
+            elif to_square == 58:
+                self._move_rook_for_castle(BLACK, 56, 59)
+
+        self._update_castling_rights(side, piece_type, from_square, capture_square, captured)
+        self.hash_key ^= Z_CASTLE[self.castling]
+
+        if move & FLAG_DOUBLE:
+            self.ep_square = from_square + 8 if side == WHITE else from_square - 8
+            self.hash_key ^= Z_EP[self.ep_square & 7]
+
+        self.halfmove = 0 if piece_type == PAWN or captured != NO_CAPTURE else self.halfmove + 1
+        self.side = opponent
+        self.hash_key ^= Z_SIDE
+        self.hash_key &= MASK64
+
+        moving_king = self.king_square(side)
+        if self.is_attacked(moving_king, opponent):
+            self.unmake_move(move, undo)
+            return None
+        return undo
+
+    def _move_rook_for_castle(self, side: int, from_square: int, to_square: int) -> None:
+        rook_index = side * 6 + ROOK
+        from_bit = BIT[from_square]
+        to_bit = BIT[to_square]
+        self.pieces[rook_index] ^= from_bit | to_bit
+        self.occ[side] ^= from_bit | to_bit
+        self.piece_at[from_square] = -1
+        self.piece_at[to_square] = rook_index
+        self.hash_key ^= Z_PIECE[rook_index][from_square] ^ Z_PIECE[rook_index][to_square]
+
+    def _update_castling_rights(
+        self, side: int, piece_type: int, from_square: int, capture_square: int, captured: int
+    ) -> None:
+        if piece_type == KING:
+            self.castling &= ~(CASTLE_WK | CASTLE_WQ) if side == WHITE else ~(CASTLE_BK | CASTLE_BQ)
+        elif piece_type == ROOK:
+            if from_square == 0:
+                self.castling &= ~CASTLE_WQ
+            elif from_square == 7:
+                self.castling &= ~CASTLE_WK
+            elif from_square == 56:
+                self.castling &= ~CASTLE_BQ
+            elif from_square == 63:
+                self.castling &= ~CASTLE_BK
+        if captured == ROOK:
+            if capture_square == 0:
+                self.castling &= ~CASTLE_WQ
+            elif capture_square == 7:
+                self.castling &= ~CASTLE_WK
+            elif capture_square == 56:
+                self.castling &= ~CASTLE_BQ
+            elif capture_square == 63:
+                self.castling &= ~CASTLE_BK
+
+    def unmake_move(self, move: int, undo: Undo) -> None:
+        from_square = move & 63
+        to_square = (move >> 6) & 63
+        piece_type = (move >> 12) & 7
+        captured = (move >> 15) & 7
+        promotion = (move >> 18) & 7
+        side = self.side ^ 1
+        opponent = self.side
+        self.side = side
+        self.castling = undo.castling
+        self.ep_square = undo.ep_square
+        self.halfmove = undo.halfmove
+
+        if move & FLAG_CASTLE:
+            if to_square == 6:
+                self._undo_rook_for_castle(WHITE, 7, 5)
+            elif to_square == 2:
+                self._undo_rook_for_castle(WHITE, 0, 3)
+            elif to_square == 62:
+                self._undo_rook_for_castle(BLACK, 63, 61)
+            elif to_square == 58:
+                self._undo_rook_for_castle(BLACK, 56, 59)
+
+        placed_type = piece_type
+        if promotion:
+            placed_type = (KNIGHT, KNIGHT, BISHOP, ROOK, QUEEN)[promotion]
+        placed_index = side * 6 + placed_type
+        self.pieces[placed_index] ^= BIT[to_square]
+        self.occ[side] ^= BIT[to_square]
+        self.piece_at[to_square] = -1
+
+        original_index = side * 6 + piece_type
+        self.pieces[original_index] |= BIT[from_square]
+        self.occ[side] |= BIT[from_square]
+        self.piece_at[from_square] = original_index
+
+        capture_square = to_square
+        if move & FLAG_EP:
+            capture_square = to_square - 8 if side == WHITE else to_square + 8
+            captured = PAWN
+        if captured != NO_CAPTURE:
+            captured_index = opponent * 6 + captured
+            self.pieces[captured_index] |= BIT[capture_square]
+            self.occ[opponent] |= BIT[capture_square]
+            self.piece_at[capture_square] = captured_index
+
+        self.hash_key = undo.hash_key
+
+    def _undo_rook_for_castle(self, side: int, original_square: int, castled_square: int) -> None:
+        rook_index = side * 6 + ROOK
+        self.pieces[rook_index] ^= BIT[original_square] | BIT[castled_square]
+        self.occ[side] ^= BIT[original_square] | BIT[castled_square]
+        self.piece_at[castled_square] = -1
+        self.piece_at[original_square] = rook_index
+
+    def make_null(self) -> Undo:
+        undo = Undo(self.castling, self.ep_square, self.halfmove, self.hash_key)
+        if self.ep_square >= 0:
+            self.hash_key ^= Z_EP[self.ep_square & 7]
+        self.ep_square = -1
+        self.halfmove += 1
+        self.side ^= 1
+        self.hash_key ^= Z_SIDE
+        return undo
+
+    def unmake_null(self, undo: Undo) -> None:
+        self.side ^= 1
+        self.castling = undo.castling
+        self.ep_square = undo.ep_square
+        self.halfmove = undo.halfmove
+        self.hash_key = undo.hash_key
+
+    def has_non_pawn_material(self, side: int) -> bool:
+        base = side * 6
+        return bool(
+            self.pieces[base + KNIGHT]
+            | self.pieces[base + BISHOP]
+            | self.pieces[base + ROOK]
+            | self.pieces[base + QUEEN]
+        )
+
+    def total_non_pawn_pieces(self) -> int:
+        count = 0
+        for side in (WHITE, BLACK):
+            base = side * 6
+            count += (
+                self.pieces[base + KNIGHT]
+                | self.pieces[base + BISHOP]
+                | self.pieces[base + ROOK]
+                | self.pieces[base + QUEEN]
+            ).bit_count()
+        return count
+
+    def insufficient_material(self) -> bool:
+        if self.pieces[PAWN] | self.pieces[6 + PAWN] | self.pieces[ROOK] | self.pieces[6 + ROOK]:
+            return False
+        if self.pieces[QUEEN] | self.pieces[6 + QUEEN]:
+            return False
+        minors = (
+            self.pieces[KNIGHT]
+            | self.pieces[BISHOP]
+            | self.pieces[6 + KNIGHT]
+            | self.pieces[6 + BISHOP]
+        ).bit_count()
+        return minors <= 1
+
+    def material_balance(self) -> int:
+        score = 0
+        for piece_type in range(5):
+            score += NON_KING_VALUE[piece_type] * (
+                self.pieces[piece_type].bit_count() - self.pieces[6 + piece_type].bit_count()
+            )
+        return score
+
+    def phase(self) -> int:
+        phase = 0
+        for side in (WHITE, BLACK):
+            base = side * 6
+            for piece_type in (KNIGHT, BISHOP, ROOK, QUEEN):
+                phase += PHASE_VALUE[piece_type] * self.pieces[base + piece_type].bit_count()
+        return min(24, phase)
+
+    def see(self, move: int) -> int:
+        piece_type = (move >> 12) & 7
+        captured = (move >> 15) & 7
+        promotion = (move >> 18) & 7
+        to_square = (move >> 6) & 63
+        if captured == NO_CAPTURE and not promotion:
+            return 0
+        gain = 0 if captured == NO_CAPTURE else NON_KING_VALUE[captured]
+        if promotion:
+            promoted_type = (KNIGHT, KNIGHT, BISHOP, ROOK, QUEEN)[promotion]
+            gain += NON_KING_VALUE[promoted_type] - NON_KING_VALUE[PAWN]
+            attacker_value = NON_KING_VALUE[promoted_type]
+        else:
+            attacker_value = NON_KING_VALUE[piece_type]
+        if self.least_attacker_value(to_square, self.side ^ 1) < INF:
+            gain -= attacker_value
+        return gain
+
+    def gives_check_fast(self, move: int) -> bool:
+        from_square = move & 63
+        to_square = (move >> 6) & 63
+        piece_type = (move >> 12) & 7
+        promotion = (move >> 18) & 7
+        side = self.side
+        enemy_king = self.king_square(side ^ 1)
+        if promotion:
+            piece_type = (KNIGHT, KNIGHT, BISHOP, ROOK, QUEEN)[promotion]
+        if piece_type == PAWN:
+            return bool(PAWN_ATTACKS[side][to_square] & BIT[enemy_king])
+        if piece_type == KNIGHT:
+            return bool(KNIGHT_ATTACKS[to_square] & BIT[enemy_king])
+        if piece_type == KING:
+            return bool(KING_ATTACKS[to_square] & BIT[enemy_king])
+        occupied = (self.occupied() ^ BIT[from_square]) | BIT[to_square]
+        if piece_type in (BISHOP, QUEEN) and bishop_attacks(to_square, occupied) & BIT[enemy_king]:
+            return True
+        return piece_type in (ROOK, QUEEN) and bool(
+            rook_attacks(to_square, occupied) & BIT[enemy_king]
+        )
+
+    def positional_move_bonus(self, move: int) -> int:
+        from_square = move & 63
+        to_square = (move >> 6) & 63
+        piece_type = (move >> 12) & 7
+        captured = (move >> 15) & 7
+        promotion = (move >> 18) & 7
+        side = self.side
+        opponent = side ^ 1
+        bonus = 0
+        phase = self.phase()
+
+        if move & FLAG_CASTLE:
+            bonus += 120
+        if piece_type in (KNIGHT, BISHOP, QUEEN):
+            bonus += CENTRAL_SCORE[to_square] - CENTRAL_SCORE[from_square]
+        if piece_type in (KNIGHT, BISHOP) and phase >= 14:
+            start_mask = START_KNIGHTS[side] if piece_type == KNIGHT else START_BISHOPS[side]
+            undeveloped = (
+                (self.pieces[side * 6 + KNIGHT] & START_KNIGHTS[side]).bit_count()
+                + (self.pieces[side * 6 + BISHOP] & START_BISHOPS[side]).bit_count()
+            )
+            if BIT[from_square] & start_mask:
+                bonus += 55
+            elif undeveloped:
+                bonus -= 28
+
+        if piece_type == PAWN:
+            rank = to_square >> 3
+            target_break_rank = 3 if side == WHITE else 4
+            if rank == target_break_rank and (to_square & 7) in (2, 3, 4, 5):
+                bonus += 20
+            if PAWN_ATTACKS[side][to_square] & self.pieces[opponent * 6 + PAWN]:
+                bonus += 16
+            if not (PASSED_MASK[side][to_square] & self.pieces[opponent * 6 + PAWN]):
+                bonus += 12 + (rank if side == WHITE else 7 - rank) * 3
+
+        if piece_type == ROOK:
+            file_ = to_square & 7
+            file_mask = FILE_MASK[file_]
+            if not (file_mask & self.pieces[side * 6 + PAWN]):
+                bonus += 16
+                if not (file_mask & self.pieces[opponent * 6 + PAWN]):
+                    bonus += 12
+            if file_ in (3, 4):
+                bonus += 8
+
+        moved_value = NON_KING_VALUE[piece_type]
+        if piece_type != PAWN and captured == NO_CAPTURE:
+            source_attacker = self.least_attacker_value(from_square, opponent)
+            target_attacker = self.least_attacker_value(to_square, opponent)
+            if source_attacker < moved_value:
+                bonus += 30
+            if target_attacker < moved_value:
+                bonus -= 45 + min(35, (moved_value - target_attacker) // 10)
+
+        if self.gives_check_fast(move):
+            bonus += 90
+        if promotion:
+            bonus += 140 if promotion == PROMO_QUEEN else 70
+        return bonus
+
+    def evaluate(self) -> int:
+        white_score = 0
+        black_score = 0
+        phase = self.phase()
+        mg_weight = phase
+        eg_weight = 24 - phase
+        occupied = self.occupied()
+        zone_hits = [0, 0]
+        weak_masks = [0, 0]
+
+        for side in (WHITE, BLACK):
+            base = side * 6
+            side_score = 0
+            for piece_type in range(6):
+                bitboard = self.pieces[base + piece_type]
+                side_score += NON_KING_VALUE[piece_type] * bitboard.bit_count()
+                work = bitboard
+                while work:
+                    lsb = work & -work
+                    square = lsb.bit_length() - 1
+                    oriented = square if side == WHITE else square ^ 56
+                    side_score += (
+                        PST_MG[piece_type][oriented] * mg_weight
+                        + PST_EG[piece_type][oriented] * eg_weight
+                    ) // 24
+                    work ^= lsb
+
+            pawn_score, weak_mask, passed_mask = self._pawn_structure(side, phase)
+            side_score += pawn_score
+            weak_masks[side] = weak_mask
+            side_score += self._development_and_castling(side, phase)
+            mobility_score, attacks_on_king = self._mobility_and_attack(side, occupied)
+            side_score += mobility_score
+            zone_hits[side] = attacks_on_king
+            side_score += self._rook_file_score(side, weak_masks[side ^ 1])
+            side_score += self._threat_penalty(side)
+
+            if self.pieces[base + BISHOP].bit_count() >= 2:
+                side_score += 24 + (24 - phase) // 2
+            if side == WHITE:
+                white_score = side_score
+            else:
+                black_score = side_score
+
+        if self._attack_phase(WHITE):
+            white_score += zone_hits[WHITE] * 4
+        if self._attack_phase(BLACK):
+            black_score += zone_hits[BLACK] * 4
+
+        score = white_score - black_score
+        material = self.material_balance()
+        if abs(material) >= 100:
+            non_pawns = self.total_non_pawn_pieces()
+            pawns = (self.pieces[PAWN] | self.pieces[6 + PAWN]).bit_count()
+            liquidation = (14 - non_pawns) * 3 - (16 - pawns) * 2
+            score += liquidation if material > 0 else -liquidation
+        return score if self.side == WHITE else -score
+
+    def _pawn_structure(self, side: int, phase: int) -> tuple[int, int, int]:
+        pawns = self.pieces[side * 6 + PAWN]
+        enemy_pawns = self.pieces[(side ^ 1) * 6 + PAWN]
+        score = 0
+        weak = 0
+        passed = 0
+        for file_ in range(8):
+            count = (pawns & FILE_MASK[file_]).bit_count()
+            if count > 1:
+                score -= 13 * (count - 1)
+        work = pawns
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            file_ = square & 7
+            rank = square >> 3
+            relative_rank = rank if side == WHITE else 7 - rank
+            isolated = not bool(pawns & ADJ_FILE_MASK[file_])
+            if isolated:
+                score -= 14
+                weak |= lsb
+            protected = bool(PAWN_ATTACKS[side ^ 1][square] & pawns)
+            if protected:
+                score += 5
+            if not (PASSED_MASK[side][square] & enemy_pawns):
+                passed |= lsb
+                bonus = (0, 4, 9, 18, 34, 58, 96, 0)[relative_rank]
+                bonus += bonus * (24 - phase) // 32
+                if protected:
+                    bonus += 12 + relative_rank * 3
+                enemy_files = 0
+                enemy_work = enemy_pawns
+                while enemy_work:
+                    enemy_lsb = enemy_work & -enemy_work
+                    enemy_files |= 1 << ((enemy_lsb.bit_length() - 1) & 7)
+                    enemy_work ^= enemy_lsb
+                if enemy_files and all(
+                    abs(file_ - enemy_file) >= 3
+                    for enemy_file in range(8)
+                    if enemy_files & (1 << enemy_file)
+                ):
+                    bonus += 10 + relative_rank * 2
+                score += bonus
+            else:
+                front = square + 8 if side == WHITE else square - 8
+                if 0 <= front < 64:
+                    support = pawns & ADJ_FILE_MASK[file_]
+                    enemy_controls = PAWN_ATTACKS[side ^ 1][front] & enemy_pawns
+                    if support and enemy_controls and not protected:
+                        score -= 8
+                        weak |= lsb
+            if relative_rank >= 4 and not protected and isolated:
+                score -= 7
+            work ^= lsb
+        return score, weak, passed
+
+    def _development_and_castling(self, side: int, phase: int) -> int:
+        if phase < 11:
+            return 0
+        base = side * 6
+        undeveloped = (
+            (self.pieces[base + KNIGHT] & START_KNIGHTS[side]).bit_count()
+            + (self.pieces[base + BISHOP] & START_BISHOPS[side]).bit_count()
+        )
+        score = -18 * undeveloped
+        king_square = self.king_square(side)
+        if BIT[king_square] & CASTLED_KING[side]:
+            score += 42
+        else:
+            side_rights = (
+                CASTLE_WK | CASTLE_WQ
+                if side == WHITE
+                else CASTLE_BK | CASTLE_BQ
+            )
+            rights = self.castling & side_rights
+            score -= 7 if rights else 34
+            king_file = king_square & 7
+            if king_file in (3, 4):
+                own_center_pawns = self.pieces[base + PAWN] & CENTRAL_FILES
+                if not own_center_pawns:
+                    score -= 24
+        return score
+
+    def _mobility_and_attack(self, side: int, occupied: int) -> tuple[int, int]:
+        own = self.occ[side]
+        opponent = side ^ 1
+        enemy_king = self.king_square(opponent)
+        zone = KING_ZONE[enemy_king]
+        base = side * 6
+        score = 0
+        zone_hits = 0
+        work = self.pieces[base + KNIGHT]
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            attacks = KNIGHT_ATTACKS[square] & ~own
+            score += attacks.bit_count() * 4 + (attacks & CORE_CENTER).bit_count() * 3
+            zone_hits += (attacks & zone).bit_count() * 2
+            work ^= lsb
+        work = self.pieces[base + BISHOP]
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            attacks = bishop_attacks(square, occupied) & ~own
+            score += attacks.bit_count() * 3 + (attacks & CORE_CENTER).bit_count() * 2
+            zone_hits += (attacks & zone).bit_count()
+            work ^= lsb
+        work = self.pieces[base + ROOK]
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            attacks = rook_attacks(square, occupied) & ~own
+            score += attacks.bit_count() * 2
+            zone_hits += (attacks & zone).bit_count()
+            work ^= lsb
+        work = self.pieces[base + QUEEN]
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            attacks = (rook_attacks(square, occupied) | bishop_attacks(square, occupied)) & ~own
+            score += attacks.bit_count()
+            zone_hits += (attacks & zone).bit_count()
+            work ^= lsb
+        return score, zone_hits
+
+    def _rook_file_score(self, side: int, enemy_weak: int) -> int:
+        rooks = self.pieces[side * 6 + ROOK]
+        own_pawns = self.pieces[side * 6 + PAWN]
+        enemy_pawns = self.pieces[(side ^ 1) * 6 + PAWN]
+        score = 0
+        work = rooks
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            file_ = square & 7
+            file_mask = FILE_MASK[file_]
+            if not (file_mask & own_pawns):
+                score += 11
+                if not (file_mask & enemy_pawns):
+                    score += 11
+                if file_mask & enemy_weak:
+                    score += 9
+            if file_ in (3, 4):
+                score += 6
+            work ^= lsb
+        return score
+
+    def _threat_penalty(self, side: int) -> int:
+        opponent = side ^ 1
+        base = side * 6
+        penalty = 0
+        for piece_type in (KNIGHT, BISHOP, ROOK, QUEEN):
+            work = self.pieces[base + piece_type]
+            value = NON_KING_VALUE[piece_type]
+            while work:
+                lsb = work & -work
+                square = lsb.bit_length() - 1
+                attacker = self.least_attacker_value(square, opponent)
+                defender = self.least_attacker_value(square, side)
+                if attacker < value:
+                    penalty -= 18 + min(45, (value - attacker) // 12)
+                    if defender >= INF:
+                        penalty -= 12
+                work ^= lsb
+
+        valuable = (
+            self.pieces[base + KNIGHT]
+            | self.pieces[base + BISHOP]
+            | self.pieces[base + ROOK]
+            | self.pieces[base + QUEEN]
+        )
+        enemy_base = opponent * 6
+        enemy_pawns = self.pieces[enemy_base + PAWN]
+        work = enemy_pawns
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            if (PAWN_ATTACKS[opponent][square] & valuable).bit_count() >= 2:
+                penalty -= 18
+            work ^= lsb
+        enemy_knights = self.pieces[enemy_base + KNIGHT]
+        work = enemy_knights
+        while work:
+            lsb = work & -work
+            square = lsb.bit_length() - 1
+            if (KNIGHT_ATTACKS[square] & valuable).bit_count() >= 2:
+                penalty -= 20
+            work ^= lsb
+        penalty -= self._line_skewer_pressure(side)
+        return penalty
+
+    def _line_skewer_pressure(self, side: int) -> int:
+        opponent = side ^ 1
+        pressure = 0
+        occupied = self.occupied()
+        enemy_base = opponent * 6
+        for piece_type, directions in ((BISHOP, BISHOP_DIRS), (ROOK, ROOK_DIRS), (QUEEN, ALL_DIRS)):
+            sliders = self.pieces[enemy_base + piece_type]
+            while sliders:
+                lsb = sliders & -sliders
+                square = lsb.bit_length() - 1
+                file_ = square & 7
+                rank = square >> 3
+                for df, dr in directions:
+                    seen_values: list[int] = []
+                    target_file = file_ + df
+                    target_rank = rank + dr
+                    while 0 <= target_file < 8 and 0 <= target_rank < 8:
+                        target = target_rank * 8 + target_file
+                        bit = BIT[target]
+                        if occupied & bit:
+                            code = self.piece_at[target]
+                            if code // 6 == opponent:
+                                break
+                            seen_values.append(NON_KING_VALUE[code % 6])
+                            if len(seen_values) == 2:
+                                if (
+                                    seen_values[0] >= NON_KING_VALUE[piece_type]
+                                    and seen_values[1] >= 320
+                                ):
+                                    pressure += 10
+                                break
+                        target_file += df
+                        target_rank += dr
+                sliders ^= lsb
+        return pressure
+
+    def _attack_phase(self, side: int) -> bool:
+        base = side * 6
+        undeveloped = (
+            (self.pieces[base + KNIGHT] & START_KNIGHTS[side])
+            | (self.pieces[base + BISHOP] & START_BISHOPS[side])
+        )
+        if undeveloped:
+            return False
+        rooks = self.pieces[base + ROOK]
+        if rooks.bit_count() < 2:
+            return self.phase() <= 10
+        first_bit = rooks & -rooks
+        first = first_bit.bit_length() - 1
+        second = (rooks ^ first_bit).bit_length() - 1
+        return bool(BETWEEN[first][second] == 0 or not (BETWEEN[first][second] & self.occupied()))
 
 
-def _tt_key(board: chess.Board, position_key: int) -> int:
-    clock = min(board.halfmove_clock, 100)
-    return position_key ^ Z_HALFMOVE[clock]
+def encode_move(
+    from_square: int,
+    to_square: int,
+    piece_type: int,
+    captured: int = NO_CAPTURE,
+    promotion: int = PROMO_NONE,
+    flags: int = 0,
+) -> int:
+    return (
+        from_square
+        | (to_square << 6)
+        | (piece_type << 12)
+        | (captured << 15)
+        | (promotion << 18)
+        | flags
+    )
+
+
+def move_to_uci(move: int) -> str:
+    from_square = move & 63
+    to_square = (move >> 6) & 63
+    promotion = (move >> 18) & 7
+    text = SQUARE_NAME[from_square] + SQUARE_NAME[to_square]
+    if promotion:
+        text += ("", "n", "b", "r", "q")[promotion]
+    return text
 
 
 def _score_to_tt(score: int, ply: int) -> int:
-    if score >= MATE_TT_THRESHOLD:
+    if score > MATE_THRESHOLD:
         return score + ply
-    if score <= -MATE_TT_THRESHOLD:
+    if score < -MATE_THRESHOLD:
         return score - ply
     return score
 
 
 def _score_from_tt(score: int, ply: int) -> int:
-    if score >= MATE_TT_THRESHOLD:
+    if score > MATE_THRESHOLD:
         return score - ply
-    if score <= -MATE_TT_THRESHOLD:
+    if score < -MATE_THRESHOLD:
         return score + ply
     return score
 
 
-def _material(board: chess.Board, color: bool) -> int:
-    occupied = board.occupied_co[color]
-    return (
-        (board.pawns & occupied).bit_count() * 100
-        + (board.knights & occupied).bit_count() * 320
-        + (board.bishops & occupied).bit_count() * 335
-        + (board.rooks & occupied).bit_count() * 500
-        + (board.queens & occupied).bit_count() * 900
-    )
+class TranspositionTable:
+    __slots__ = ("keys", "moves", "scores", "evals", "depths", "flags", "ages", "age", "mask")
 
+    def __init__(self, power: int = 18) -> None:
+        size = 1 << power
+        self.mask = size - 1
+        self.keys = [0] * size
+        self.moves = [0] * size
+        self.scores = [0] * size
+        self.evals = [INF] * size
+        self.depths = [-128] * size
+        self.flags = [0] * size
+        self.ages = [0] * size
+        self.age = 0
 
-def _minor_home_count(board: chess.Board, color: bool) -> int:
-    occupied = board.occupied_co[color]
-    minors = (board.knights | board.bishops) & occupied
-    home = WHITE_HOME_MINORS if color == chess.WHITE else BLACK_HOME_MINORS
-    return (minors & home).bit_count()
+    def new_search(self) -> None:
+        self.age = (self.age + 1) & 255
 
-
-def _is_castled(board: chess.Board, color: bool) -> bool:
-    king = board.king(color)
-    return king in CASTLED_SQUARES[1 if color == chess.WHITE else 0]
-
-
-def _pawn_structure(board: chess.Board, color: bool) -> tuple[int, int]:
-    own = board.pawns & board.occupied_co[color]
-    enemy = board.pawns & board.occupied_co[not color]
-    score = 0
-    weak = 0
-    enemy_files = 0
-    for file_index in range(8):
-        if enemy & FILE_MASKS[file_index]:
-            enemy_files |= 1 << file_index
-        count = (own & FILE_MASKS[file_index]).bit_count()
-        if count > 1:
-            score -= 13 * (count - 1)
-
-    mask = own
-    while mask:
-        lsb = mask & -mask
-        square = lsb.bit_length() - 1
-        mask ^= lsb
-        file_index = square & 7
-        rank = square >> 3
-        rel_rank = rank if color == chess.WHITE else 7 - rank
-        adjacent = own & ADJACENT_FILE_MASKS[file_index]
-        isolated = adjacent == 0
-        if isolated:
-            score -= 11
-            weak |= lsb
-
-        if PASSED_MASKS[1 if color == chess.WHITE else 0][square] & enemy == 0:
-            passed_bonus = (0, 4, 8, 16, 30, 50, 82, 0)[rel_rank]
-            support = PAWN_ATTACKS[0 if color == chess.WHITE else 1][square] & own
-            if support:
-                passed_bonus += 12 + rel_rank * 2
-            left_clear = (enemy_files & ((1 << file_index) - 1)) == 0
-            right_clear = (enemy_files >> (file_index + 1)) == 0
-            if (file_index <= 2 and left_clear) or (file_index >= 5 and right_clear):
-                passed_bonus += 10
-            score += passed_bonus
-
-        attacks = PAWN_ATTACKS[1 if color == chess.WHITE else 0][square]
-        if attacks & enemy:
-            score += 4
-
-        forward = square + (8 if color == chess.WHITE else -8)
-        if 0 <= forward < 64:
-            enemy_pawn_attackers = PAWN_ATTACKS[1 if color == chess.WHITE else 0][forward]
-            enemy_pawn_attackers &= enemy
-            support_band = adjacent
-            if color == chess.WHITE:
-                below = (1 << (rank * 8)) - 1
-                support_band &= ~below
-            else:
-                above = ~((1 << ((rank + 1) * 8)) - 1)
-                support_band &= ~above
-            if enemy_pawn_attackers and not support_band:
-                score -= 7
-                weak |= lsb
-
-        supporters = PAWN_ATTACKS[0 if color == chess.WHITE else 1][square] & own
-        if rel_rank >= 4 and not supporters and not isolated:
-            score -= 4
-
-    return score, weak
-
-
-def _rook_connection(board: chess.Board, color: bool) -> bool:
-    rooks = board.rooks & board.occupied_co[color]
-    if rooks.bit_count() < 2:
-        return False
-    squares = _bits(rooks)
-    for i, first in enumerate(squares):
-        for second in squares[i + 1 :]:
-            same_file = (first & 7) == (second & 7)
-            same_rank = (first >> 3) == (second >> 3)
-            if not (same_file or same_rank):
-                continue
-            between = BETWEEN[first][second]
-            if (between & board.occupied) == 0:
-                return True
-    return False
-
-
-def _king_shelter(board: chess.Board, color: bool) -> int:
-    king = board.king(color)
-    if king is None:
-        return 0
-    file_index = king & 7
-    rank = king >> 3
-    own_pawns = board.pawns & board.occupied_co[color]
-    score = 0
-    direction = 1 if color == chess.WHITE else -1
-    for df in (-1, 0, 1):
-        nf = file_index + df
-        if not 0 <= nf < 8:
-            continue
-        found = False
-        for distance in (1, 2):
-            nr = rank + direction * distance
-            if 0 <= nr < 8 and own_pawns & (1 << (nr * 8 + nf)):
-                score += 8 if distance == 1 else 4
-                found = True
-                break
-        if not found:
-            score -= 5
-    return score
-
-
-def _piece_activity(
-    board: chess.Board,
-    color: bool,
-    enemy_king: int | None,
-    attack_phase: bool,
-) -> int:
-    own = board.occupied_co[color]
-    score = 0
-    for piece_type, mobility_weight in (
-        (chess.KNIGHT, 2),
-        (chess.BISHOP, 2),
-        (chess.ROOK, 1),
-        (chess.QUEEN, 1),
-    ):
-        pieces = board.pieces_mask(piece_type, color)
-        mask = pieces
-        while mask:
-            lsb = mask & -mask
-            square = lsb.bit_length() - 1
-            mask ^= lsb
-            attacks = board.attacks_mask(square)
-            mobility = (attacks & ~own).bit_count()
-            score += min(10, mobility) * mobility_weight
-            score += (attacks & CORE_MASK).bit_count() * (3 if piece_type <= chess.BISHOP else 1)
-            if attack_phase and enemy_king is not None:
-                zone_hits = (attacks & KING_ZONE[enemy_king]).bit_count()
-                if piece_type == chess.QUEEN:
-                    score += zone_hits * 4
-                elif piece_type == chess.ROOK:
-                    score += zone_hits * 5
-                else:
-                    score += zone_hits * 6
-    return score
-
-
-def _evaluate_white(board: chess.Board) -> int:
-    score = 0
-    phase = (
-        board.knights.bit_count()
-        + board.bishops.bit_count()
-        + board.rooks.bit_count() * 2
-        + board.queens.bit_count() * 4
-    )
-    pawn_info = (
-        _pawn_structure(board, chess.BLACK),
-        _pawn_structure(board, chess.WHITE),
-    )
-    for color in (chess.BLACK, chess.WHITE):
-        sign = 1 if color == chess.WHITE else -1
-        occupied = board.occupied_co[color]
-        for piece_type in range(chess.PAWN, chess.KING + 1):
-            mask = board.pieces_mask(piece_type, color)
-            count = mask.bit_count()
-            if piece_type != chess.KING:
-                score += sign * PIECE_VALUE[piece_type] * count
-            while mask:
-                lsb = mask & -mask
-                square = lsb.bit_length() - 1
-                mask ^= lsb
-                score += sign * PST[1 if color == chess.WHITE else 0][piece_type][square]
-
-        pawn_score, _ = pawn_info[1 if color == chess.WHITE else 0]
-        _, enemy_weak_pawns = pawn_info[0 if color == chess.WHITE else 1]
-        score += sign * pawn_score
-
-        home_minors = _minor_home_count(board, color)
-        opening = board.fullmove_number <= 18 and phase >= 14
-        if opening:
-            score -= sign * home_minors * 19
-            if home_minors:
-                active_minors = (board.knights | board.bishops) & occupied
-                active_minors &= ~(WHITE_HOME_MINORS if color == chess.WHITE else BLACK_HOME_MINORS)
-                while active_minors:
-                    lsb = active_minors & -active_minors
-                    square = lsb.bit_length() - 1
-                    active_minors ^= lsb
-                    rel_rank = (square >> 3) if color == chess.WHITE else 7 - (square >> 3)
-                    if rel_rank >= 3:
-                        score -= sign * 6
-            queen_square = START_QUEEN[1 if color == chess.WHITE else 0]
-            own_queen_on_start = bool(board.queens & occupied & (1 << queen_square))
-            if home_minors >= 2 and not own_queen_on_start:
-                score -= sign * 9
-
-        castled = _is_castled(board, color)
-        if castled:
-            score += sign * (32 if opening else 16)
-            score += sign * _king_shelter(board, color)
-        else:
-            king = board.king(color)
-            has_rights = (
-                board.has_kingside_castling_rights(color)
-                or board.has_queenside_castling_rights(color)
+    def probe(self, key: int, ply: int) -> tuple[int, int, int, int, int] | None:
+        index = key & self.mask
+        if self.flags[index] and self.keys[index] == key:
+            return (
+                self.depths[index],
+                _score_from_tt(self.scores[index], ply),
+                self.flags[index],
+                self.moves[index],
+                self.evals[index],
             )
-            if opening and not has_rights:
-                score -= sign * 26
-            if king is not None and king == START_KING[1 if color == chess.WHITE else 0]:
-                king_file = king & 7
-                if not (board.pawns & occupied & FILE_MASKS[king_file]):
-                    score -= sign * 22
-
-        own_pawns = board.pawns & occupied
-        enemy_pawns = board.pawns & board.occupied_co[not color]
-        rooks = board.rooks & occupied
-        rook_mask = rooks
-        while rook_mask:
-            lsb = rook_mask & -rook_mask
-            square = lsb.bit_length() - 1
-            rook_mask ^= lsb
-            file_index = square & 7
-            own_on_file = own_pawns & FILE_MASKS[file_index]
-            enemy_on_file = enemy_pawns & FILE_MASKS[file_index]
-            if not own_on_file:
-                score += sign * 9
-                if not enemy_on_file:
-                    score += sign * 11
-            if file_index in CENTER_FILES:
-                score += sign * 5
-            if enemy_weak_pawns & FILE_MASKS[file_index]:
-                score += sign * 6
-
-        connected = _rook_connection(board, color)
-        attack_phase = home_minors <= 1 and (castled or connected)
-        if attack_phase:
-            score += sign * 8
-            pawns = own_pawns
-            while pawns:
-                lsb = pawns & -pawns
-                square = lsb.bit_length() - 1
-                pawns ^= lsb
-                rel_rank = (square >> 3) if color == chess.WHITE else 7 - (square >> 3)
-                if rel_rank >= 4:
-                    score += sign * min(8, (rel_rank - 3) * 3)
-
-        enemy_king = board.king(not color)
-        activity = _piece_activity(board, color, enemy_king, attack_phase)
-        score += sign * activity
-
-        enemy_pawn_attacks = 0
-        enemy_pawn_mask = enemy_pawns
-        enemy_index = 0 if color == chess.WHITE else 1
-        while enemy_pawn_mask:
-            lsb = enemy_pawn_mask & -enemy_pawn_mask
-            square = lsb.bit_length() - 1
-            enemy_pawn_mask ^= lsb
-            enemy_pawn_attacks |= PAWN_ATTACKS[enemy_index][square]
-        for piece_type, penalty in (
-            (chess.KNIGHT, 10),
-            (chess.BISHOP, 10),
-            (chess.ROOK, 16),
-            (chess.QUEEN, 25),
-        ):
-            threatened = board.pieces_mask(piece_type, color) & enemy_pawn_attacks
-            score -= sign * threatened.bit_count() * penalty
-
-    white_material = _material(board, chess.WHITE)
-    black_material = _material(board, chess.BLACK)
-    material_delta = white_material - black_material
-    total_nonpawns = (
-        board.knights | board.bishops | board.rooks | board.queens
-    ).bit_count()
-    total_pawns = board.pawns.bit_count()
-    if material_delta >= 100:
-        simplify = (14 - total_nonpawns) * 3 - (16 - total_pawns)
-        score += max(-10, min(42, simplify))
-    elif material_delta <= -100:
-        simplify = (14 - total_nonpawns) * 3 - (16 - total_pawns)
-        score -= max(-10, min(42, simplify))
-
-    if phase <= 8:
-        for color in (chess.BLACK, chess.WHITE):
-            king = board.king(color)
-            if king is not None:
-                sign = 1 if color == chess.WHITE else -1
-                score += sign * CENTER_SCORE[king] * 2
-
-    return score
-
-
-def _evaluate(board: chess.Board) -> int:
-    score = _evaluate_white(board)
-    return score if board.turn == chess.WHITE else -score
-
-
-def _least_attacker_value(board: chess.Board, color: bool, square: int, exclude: int = -1) -> int:
-    attackers = board.attackers_mask(color, square)
-    if exclude >= 0:
-        attackers &= ~(1 << exclude)
-    if not attackers:
-        return INF
-    for piece_type in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
-        if attackers & board.pieces_mask(piece_type, color):
-            return PIECE_VALUE[piece_type] if piece_type != chess.KING else 20_000
-    return INF
-
-
-def _see_estimate(board: chess.Board, move: chess.Move) -> int:
-    moving_type = board.piece_type_at(move.from_square)
-    if moving_type is None:
-        return -INF
-    if board.is_en_passant(move):
-        victim_value = 100
-    else:
-        victim_type = board.piece_type_at(move.to_square)
-        victim_value = PIECE_VALUE[victim_type] if victim_type is not None else 0
-    gain = victim_value
-    attacker_value = PIECE_VALUE[moving_type]
-    if move.promotion is not None:
-        gain += PIECE_VALUE[move.promotion] - 100
-        attacker_value = PIECE_VALUE[move.promotion]
-    enemy = not board.turn
-    enemy_recapture = _least_attacker_value(board, enemy, move.to_square)
-    if enemy_recapture >= INF:
-        return gain
-    own_recapture = _least_attacker_value(board, board.turn, move.to_square, move.from_square)
-    estimate = gain - attacker_value
-    if own_recapture < INF:
-        estimate += min(enemy_recapture, own_recapture)
-    return estimate
-
-
-def _square_low_threat(board: chess.Board, color: bool, square: int, piece_value: int) -> bool:
-    enemy = not color
-    enemy_occ = board.occupied_co[enemy]
-    enemy_pawns = board.pawns & enemy_occ
-    if piece_value > 100 and PAWN_ATTACKS[1 if color == chess.WHITE else 0][square] & enemy_pawns:
-        return True
-    enemy_knights = board.knights & enemy_occ
-    return piece_value > 320 and bool(KNIGHT_ATTACKS[square] & enemy_knights)
-
-
-def _gives_check_hint(board: chess.Board, move: chess.Move) -> bool:
-    color = board.turn
-    enemy_king = board.king(not color)
-    piece_type = board.piece_type_at(move.from_square)
-    if enemy_king is None or piece_type is None:
-        return False
-
-    to_square = move.to_square
-    king_bit = 1 << enemy_king
-    if move.promotion is not None:
-        piece_type = move.promotion
-    if piece_type == chess.PAWN:
-        direct = bool(PAWN_ATTACKS[1 if color == chess.WHITE else 0][to_square] & king_bit)
-    elif piece_type == chess.KNIGHT:
-        direct = bool(KNIGHT_ATTACKS[to_square] & king_bit)
-    elif piece_type == chess.KING:
-        direct = bool(KING_ATTACKS[to_square] & king_bit)
-    else:
-        tf = to_square & 7
-        tr = to_square >> 3
-        kf = enemy_king & 7
-        kr = enemy_king >> 3
-        diagonal = abs(tf - kf) == abs(tr - kr)
-        orthogonal = tf == kf or tr == kr
-        line_piece = (piece_type in (chess.BISHOP, chess.QUEEN) and diagonal) or (
-            piece_type in (chess.ROOK, chess.QUEEN) and orthogonal
-        )
-        occupied = board.occupied & ~(1 << move.from_square)
-        if board.is_en_passant(move):
-            captured = to_square - 8 if color == chess.WHITE else to_square + 8
-            occupied &= ~(1 << captured)
-        direct = line_piece and not (BETWEEN[to_square][enemy_king] & occupied)
-
-    if direct:
-        return True
-    if piece_type == chess.KING and board.is_castling(move):
-        return board.gives_check(move)
-
-    ff = move.from_square & 7
-    fr = move.from_square >> 3
-    kf = enemy_king & 7
-    kr = enemy_king >> 3
-    aligned = ff == kf or fr == kr or abs(ff - kf) == abs(fr - kr)
-    if not aligned and not board.is_en_passant(move):
-        return False
-
-    occupied = (board.occupied & ~(1 << move.from_square)) | (1 << to_square)
-    if board.is_en_passant(move):
-        captured = to_square - 8 if color == chess.WHITE else to_square + 8
-        occupied &= ~(1 << captured)
-    discovered = board.attackers_mask(color, enemy_king, occupied)
-    discovered &= ~(1 << move.from_square)
-    return bool(discovered & (board.bishops | board.rooks | board.queens))
-
-
-def _pawn_break_bonus(board: chess.Board, move: chess.Move, color: bool) -> int:
-    piece_type = board.piece_type_at(move.from_square)
-    if piece_type != chess.PAWN:
-        return 0
-    to_square = move.to_square
-    file_index = to_square & 7
-    rank = to_square >> 3
-    target_rank = 3 if color == chess.WHITE else 4
-    bonus = 0
-    if rank == target_rank and file_index in (2, 3, 4, 5):
-        bonus += 1800
-    enemy_pawns = board.pawns & board.occupied_co[not color]
-    if PAWN_ATTACKS[1 if color == chess.WHITE else 0][to_square] & enemy_pawns:
-        bonus += 2400
-    return bonus
-
-
-def _positional_move_bonus(board: chess.Board, move: chess.Move, gives_check: bool) -> int:
-    color = board.turn
-    piece_type = board.piece_type_at(move.from_square)
-    if piece_type is None:
-        return 0
-    from_square = move.from_square
-    to_square = move.to_square
-    piece_value = PIECE_VALUE[piece_type] if piece_type != chess.KING else 20_000
-    bonus = 0
-
-    if piece_type in (chess.KNIGHT, chess.BISHOP, chess.QUEEN):
-        bonus += (CENTER_SCORE[to_square] - CENTER_SCORE[from_square]) * 65
-        if (1 << to_square) & CORE_MASK:
-            bonus += 900
-        elif (1 << to_square) & EXTENDED_CENTER_MASK:
-            bonus += 350
-
-    home = WHITE_HOME_MINORS if color == chess.WHITE else BLACK_HOME_MINORS
-    if piece_type in (chess.KNIGHT, chess.BISHOP):
-        if (1 << from_square) & home and not ((1 << to_square) & home):
-            bonus += 2800
-        elif board.fullmove_number <= 18 and _minor_home_count(board, color) > 0:
-            bonus -= 1600
-
-    if board.is_castling(move):
-        bonus += 7800
-
-    bonus += _pawn_break_bonus(board, move, color)
-
-    if piece_type == chess.ROOK:
-        file_index = to_square & 7
-        own_pawns = board.pawns & board.occupied_co[color]
-        enemy_pawns = board.pawns & board.occupied_co[not color]
-        if not (own_pawns & FILE_MASKS[file_index]):
-            bonus += 1100
-            if not (enemy_pawns & FILE_MASKS[file_index]):
-                bonus += 900
-        if file_index in CENTER_FILES:
-            bonus += 500
-
-    from_threat = _square_low_threat(board, color, from_square, piece_value)
-    to_threat = _square_low_threat(board, color, to_square, piece_value)
-    if from_threat and not to_threat:
-        bonus += 2600
-    elif to_threat:
-        bonus -= 4400
-
-    enemy_occ = board.occupied_co[not color]
-    if piece_type == chess.KNIGHT:
-        targets = KNIGHT_ATTACKS[to_square] & enemy_occ & (board.rooks | board.queens | board.kings)
-        if targets.bit_count() >= 2:
-            bonus += 3300
-    elif piece_type == chess.PAWN:
-        targets = PAWN_ATTACKS[1 if color == chess.WHITE else 0][to_square]
-        targets &= enemy_occ & (board.knights | board.bishops | board.rooks | board.queens)
-        if targets.bit_count() >= 2:
-            bonus += 2600
-
-    enemy_king = board.king(not color)
-    if enemy_king is not None:
-        zone = KING_ZONE[enemy_king]
-        if piece_type == chess.KNIGHT and KNIGHT_ATTACKS[to_square] & zone:
-            bonus += 900
-        elif (
-            piece_type == chess.PAWN
-            and PAWN_ATTACKS[1 if color == chess.WHITE else 0][to_square] & zone
-        ):
-            bonus += 700
-
-    if gives_check:
-        bonus += 3600
-    return bonus
-
-
-def _capture_score(
-    board: chess.Board, move: chess.Move, material_advantage: int
-) -> tuple[int, int]:
-    moving_type = board.piece_type_at(move.from_square)
-    attacker = PIECE_VALUE[moving_type] if moving_type is not None else 0
-    if board.is_en_passant(move):
-        victim = 100
-        victim_type = chess.PAWN
-    else:
-        victim_type = board.piece_type_at(move.to_square)
-        victim = PIECE_VALUE[victim_type] if victim_type is not None else 0
-    see = _see_estimate(board, move)
-    score = victim * 32 - attacker + see * 8
-    if material_advantage >= 100:
-        if victim_type is not None and victim_type != chess.PAWN:
-            score += 1800
-        elif victim_type == chess.PAWN:
-            score -= 500
-    return score, see
-
-
-def _move_code(move: chess.Move) -> int:
-    return move.from_square * 64 + move.to_square
-
-
-class _Searcher:
-    def __init__(self, board: chess.Board, deadline_ns: int, root_key: int) -> None:
-        self.board = board
-        self.deadline_ns = deadline_ns
-        self.nodes = 0
-        self.root_key = root_key
-        self.repetition: dict[int, int] = {}
-        for key in _GAME_KEYS:
-            self.repetition[key] = self.repetition.get(key, 0) + 1
-        if root_key not in self.repetition:
-            self.repetition[root_key] = 1
-        self.root_best: chess.Move | None = None
-        self.root_score = 0
-
-    def _check_time(self) -> None:
-        self.nodes += 1
-        if self.nodes & 127 == 0 and time.perf_counter_ns() >= self.deadline_ns:
-            raise _SearchTimeout
-
-    def _push(self, move: chess.Move) -> int:
-        self.board.push(move)
-        key = _position_key(self.board)
-        self.repetition[key] = self.repetition.get(key, 0) + 1
-        return key
-
-    def _pop(self, key: int) -> None:
-        count = self.repetition[key] - 1
-        if count:
-            self.repetition[key] = count
-        else:
-            del self.repetition[key]
-        self.board.pop()
-
-    def _probe(self, tt_key: int) -> _TTEntry | None:
-        entry = _TT[tt_key & TT_MASK]
-        if entry is not None and entry.key == tt_key:
-            return entry
         return None
 
-    def _store(
+    def store(
         self,
-        tt_key: int,
+        key: int,
         depth: int,
         score: int,
         flag: int,
-        move: chess.Move | None,
+        move: int,
         static_eval: int,
         ply: int,
     ) -> None:
-        global _TT_AGE
-        index = tt_key & TT_MASK
-        old = _TT[index]
-        if old is not None and old.key != tt_key and old.age == _TT_AGE and old.depth > depth + 1:
+        index = key & self.mask
+        replace = (
+            not self.flags[index]
+            or self.keys[index] != key
+            or self.ages[index] != self.age
+            or depth + 2 >= self.depths[index]
+            or flag == TT_EXACT
+        )
+        if not replace:
             return
-        _TT[index] = _TTEntry(
-            tt_key,
-            depth,
-            _score_to_tt(score, ply),
-            flag,
-            move,
-            static_eval,
-            _TT_AGE,
-        )
+        same_key = self.keys[index] == key
+        self.keys[index] = key
+        self.depths[index] = max(-127, min(127, depth))
+        self.scores[index] = _score_to_tt(score, ply)
+        self.flags[index] = flag
+        if move:
+            self.moves[index] = move
+        elif not same_key:
+            self.moves[index] = 0
+        self.evals[index] = max(-INF, min(INF, static_eval))
+        self.ages[index] = self.age
 
-    def _terminal_or_draw(self, position_key: int, ply: int) -> int | None:
-        if self.repetition.get(position_key, 0) >= 3:
-            return 0
-        if self.board.halfmove_clock >= 100:
-            if self.board.is_checkmate():
-                return -MATE + ply
-            return 0
-        if not (self.board.pawns | self.board.rooks | self.board.queens):
-            minors = (self.board.knights | self.board.bishops).bit_count()
-            if minors <= 1:
-                return 0
-        return None
 
-    def _ordered_moves(
-        self,
-        moves: list[chess.Move],
-        tt_move: chess.Move | None,
-        ply: int,
-        previous_move: chess.Move | None,
-        qsearch: bool = False,
-    ) -> list[chess.Move]:
-        color_index = 1 if self.board.turn == chess.WHITE else 0
-        killer0, killer1 = _KILLERS[ply] if ply < MAX_PLY else (None, None)
-        counter = _COUNTERS[_move_code(previous_move)] if previous_move is not None else None
-        scored: list[tuple[int, chess.Move]] = []
-        material_advantage = _material(self.board, self.board.turn) - _material(
-            self.board, not self.board.turn
-        )
-        for index, move in enumerate(moves):
-            if index % 8 == 0 and time.perf_counter_ns() >= self.deadline_ns:
-                raise _SearchTimeout
-            if tt_move is not None and move == tt_move:
-                scored.append((1_000_000_000, move))
-                continue
-            capture = self.board.is_capture(move)
-            promotion = move.promotion is not None
-            gives_check = _gives_check_hint(self.board, move)
-            if capture or promotion:
-                capture_order, see = _capture_score(self.board, move, material_advantage)
-                if promotion:
-                    capture_order += PIECE_VALUE[move.promotion or chess.QUEEN] * 12
-                if gives_check:
-                    capture_order += 4200
-                if see >= -20 or promotion:
-                    score = 800_000_000 + capture_order
-                else:
-                    score = 100_000_000 + capture_order
-                scored.append((score, move))
-                continue
-            if qsearch:
-                scored.append((300_000_000 if gives_check else 0, move))
-                continue
-            if move == killer0:
-                scored.append((700_000_000, move))
-                continue
-            if move == killer1:
-                scored.append((690_000_000, move))
-                continue
-            if counter is not None and move == counter:
-                scored.append((670_000_000, move))
-                continue
-            history = _HISTORY[color_index][move.from_square][move.to_square]
-            positional = _positional_move_bonus(self.board, move, gives_check)
-            scored.append((500_000_000 + history * 16 + positional, move))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [move for _, move in scored]
+class SearchAbort(Exception):
+    pass
 
-    def _update_quiet_cutoff(
-        self,
-        move: chess.Move,
-        quiet_tried: list[chess.Move],
-        depth: int,
-        ply: int,
-        previous_move: chess.Move | None,
-    ) -> None:
-        color_index = 1 if self.board.turn == chess.WHITE else 0
-        bonus = min(1800, 24 * depth * depth + 32 * depth)
-        current = _HISTORY[color_index][move.from_square][move.to_square]
-        _HISTORY[color_index][move.from_square][move.to_square] = min(32_000, current + bonus)
-        for failed in quiet_tried:
-            if failed == move:
-                continue
-            old = _HISTORY[color_index][failed.from_square][failed.to_square]
-            _HISTORY[color_index][failed.from_square][failed.to_square] = max(
-                -32_000, old - bonus // 3
-            )
-        if ply < MAX_PLY:
-            first = _KILLERS[ply][0]
-            if first != move:
-                _KILLERS[ply][1] = first
-                _KILLERS[ply][0] = move
-        if previous_move is not None:
-            _COUNTERS[_move_code(previous_move)] = move
 
-    def _qsearch(
-        self,
-        alpha: int,
-        beta: int,
-        ply: int,
-        qply: int,
-        position_key: int,
-        previous_move: chess.Move | None,
-    ) -> int:
-        self._check_time()
-        terminal = self._terminal_or_draw(position_key, ply)
-        if terminal is not None:
-            return terminal
-        if ply >= MAX_PLY - 2:
-            return _evaluate(self.board)
+class Searcher:
+    __slots__ = (
+        "tt",
+        "history",
+        "killers",
+        "countermoves",
+        "position",
+        "deadline_ns",
+        "time_check_mask",
+        "nodes",
+        "path_keys",
+        "root_best",
+        "root_score",
+        "root_depth",
+    )
 
-        in_check = self.board.is_check()
-        tt_key = _tt_key(self.board, position_key)
-        entry = self._probe(tt_key)
-        if entry is not None:
-            tt_score = _score_from_tt(entry.score, ply)
-            if entry.flag == EXACT:
-                return max(alpha, min(beta, tt_score))
-            if entry.flag == LOWER and tt_score >= beta:
-                return beta
-            if entry.flag == UPPER and tt_score <= alpha:
-                return alpha
+    def __init__(self) -> None:
+        self.tt = TranspositionTable()
+        self.history = [[[0 for _ in range(64)] for _ in range(64)] for _ in range(2)]
+        self.killers = [[0, 0] for _ in range(MAX_PLY)]
+        self.countermoves = [[0 for _ in range(64)] for _ in range(12)]
+        self.position = Position("8/8/8/8/8/8/4K3/7k w - - 0 1")
+        self.deadline_ns = 0
+        self.time_check_mask = 255
+        self.nodes = 0
+        self.path_keys = [0] * (MAX_PLY + 1)
+        self.root_best = 0
+        self.root_score = 0
+        self.root_depth = 1
 
-        static_eval = entry.static_eval if entry is not None else _evaluate(self.board)
-        original_alpha = alpha
-        if not in_check:
-            if qply >= 10:
-                return static_eval
-            if static_eval >= beta:
-                self._store(tt_key, 0, beta, LOWER, None, static_eval, ply)
-                return beta
-            if static_eval > alpha:
-                alpha = static_eval
+    def choose_move(self, fen: str, time_left_ms: int) -> str:
+        self.position = Position(fen)
+        root_moves = self._legal_root_moves()
+        if not root_moves:
+            return "0000"
+        if len(root_moves) == 1:
+            return move_to_uci(root_moves[0])
 
-        legal = list(self.board.legal_moves)
-        if not legal:
-            return -MATE + ply if in_check else 0
-
-        tactical: list[chess.Move] = []
-        if in_check:
-            tactical = legal
+        budget_ms = self._time_budget_ms(time_left_ms)
+        self.deadline_ns = time.perf_counter_ns() + budget_ms * 1_000_000
+        if budget_ms < 30:
+            self.time_check_mask = 15
+        elif budget_ms < 100:
+            self.time_check_mask = 31
+        elif budget_ms < 400:
+            self.time_check_mask = 63
         else:
-            for move in legal:
-                if self.board.is_capture(move):
-                    tactical.append(move)
-                elif move.promotion == chess.QUEEN:
-                    tactical.append(move)
-                elif qply < 2 and _gives_check_hint(self.board, move):
-                    tactical.append(move)
+            self.time_check_mask = 255
+        self.nodes = 0
+        self.path_keys[0] = self.position.hash_key
+        self.tt.new_search()
+        best_move = root_moves[0]
+        best_score = 0
+        previous_score = 0
+        self.root_depth = 1
 
-        if not tactical:
-            flag = EXACT if alpha > original_alpha else UPPER
-            self._store(tt_key, 0, alpha, flag, None, static_eval, ply)
-            return alpha
-
-        tt_move = entry.move if entry is not None else None
-        ordered = self._ordered_moves(tactical, tt_move, ply, previous_move, qsearch=True)
-        best_move: chess.Move | None = None
-        for move in ordered:
-            capture = self.board.is_capture(move)
-            gives_check = _gives_check_hint(self.board, move)
-            if not in_check and capture:
-                victim_type = (
-                    chess.PAWN
-                    if self.board.is_en_passant(move)
-                    else self.board.piece_type_at(move.to_square)
-                )
-                victim = PIECE_VALUE[victim_type] if victim_type is not None else 0
-                if (
-                    move.promotion is None
-                    and static_eval + victim + 120 < alpha
-                    and not gives_check
-                ):
-                    continue
-                if (
-                    _see_estimate(self.board, move) < -110
-                    and not gives_check
-                    and move.promotion is None
-                ):
-                    continue
-            child_key = self._push(move)
+        for depth in range(1, 64):
+            if time.perf_counter_ns() >= self.deadline_ns:
+                break
             try:
-                score = -self._qsearch(-beta, -alpha, ply + 1, qply + 1, child_key, move)
-            finally:
-                self._pop(child_key)
-            if score >= beta:
-                self._store(tt_key, 0, beta, LOWER, move, static_eval, ply)
-                return beta
+                if depth >= 4:
+                    window = 35
+                    alpha = max(-INF, previous_score - window)
+                    beta = min(INF, previous_score + window)
+                    while True:
+                        score, move = self._root_search(root_moves, depth, alpha, beta)
+                        if score <= alpha and alpha > -INF:
+                            window *= 2
+                            alpha = max(-INF, previous_score - window)
+                            continue
+                        if score >= beta and beta < INF:
+                            window *= 2
+                            beta = min(INF, previous_score + window)
+                            continue
+                        break
+                else:
+                    score, move = self._root_search(root_moves, depth, -INF, INF)
+            except SearchAbort:
+                break
+            best_move = move
+            best_score = score
+            previous_score = score
+            self.root_best = best_move
+            self.root_score = best_score
+            self.root_depth = depth
+            if abs(score) >= MATE_THRESHOLD:
+                break
+            if time.perf_counter_ns() + 2_000_000 >= self.deadline_ns:
+                break
+        return move_to_uci(best_move)
+
+    def _time_budget_ms(self, time_left_ms: int) -> int:
+        safe_time = max(1, time_left_ms)
+        if safe_time <= 300:
+            return max(5, safe_time // 12)
+        if safe_time <= 1_500:
+            return max(12, min(70, safe_time // 18 + 8))
+        if safe_time <= 5_000:
+            target = safe_time // 40 + 120
+        elif safe_time <= 30_000:
+            target = safe_time // 35 + 260
+        else:
+            target = safe_time // 30 + 420
+        reserve = max(80, safe_time // 25)
+        return max(15, min(target, safe_time - reserve, 5_000))
+
+    def _legal_root_moves(self) -> list[int]:
+        legal: list[int] = []
+        for move in self.position.generate_moves():
+            undo = self.position.make_move(move)
+            if undo is None:
+                continue
+            self.position.unmake_move(move, undo)
+            legal.append(move)
+        return legal
+
+    def _root_search(
+        self, root_moves: list[int], depth: int, alpha: int, beta: int
+    ) -> tuple[int, int]:
+        original_alpha = alpha
+        tt_entry = self.tt.probe(self.position.hash_key, 0)
+        tt_move = tt_entry[3] if tt_entry is not None else 0
+        ordered = self._order_moves(root_moves, tt_move, 0, 0)
+        best_move = ordered[0]
+        best_score = -INF
+        legal_index = 0
+        static_eval = self.position.evaluate()
+
+        for move in ordered:
+            self._check_time(force=True)
+            undo = self.position.make_move(move)
+            if undo is None:
+                continue
+            legal_index += 1
+            self.path_keys[1] = self.position.hash_key
+            if legal_index == 1:
+                score = -self._search(depth - 1, -beta, -alpha, 1, True, True, move)
+            else:
+                score = -self._search(depth - 1, -alpha - 1, -alpha, 1, False, True, move)
+                if alpha < score < beta:
+                    score = -self._search(depth - 1, -beta, -alpha, 1, True, True, move)
+            self.position.unmake_move(move, undo)
+            if score > best_score:
+                best_score = score
+                best_move = move
             if score > alpha:
                 alpha = score
-                best_move = move
+            if alpha >= beta:
+                self.tt.store(
+                    self.position.hash_key, depth, beta, TT_LOWER, best_move, static_eval, 0
+                )
+                return beta, best_move
 
-        flag = EXACT if alpha > original_alpha else UPPER
-        self._store(tt_key, 0, alpha, flag, best_move, static_eval, ply)
-        return alpha
+        flag = TT_EXACT if alpha > original_alpha else TT_UPPER
+        self.tt.store(self.position.hash_key, depth, alpha, flag, best_move, static_eval, 0)
+        return alpha, best_move
 
     def _search(
         self,
@@ -1851,367 +2377,349 @@ class _Searcher:
         ply: int,
         pv_node: bool,
         allow_null: bool,
-        position_key: int,
-        previous_move: chess.Move | None,
+        previous_move: int,
     ) -> int:
+        self.nodes += 1
         self._check_time()
-        if depth <= 0:
-            return self._qsearch(alpha, beta, ply, 0, position_key, previous_move)
-
-        terminal = self._terminal_or_draw(position_key, ply)
-        if terminal is not None:
-            return terminal
         if ply >= MAX_PLY - 2:
-            return _evaluate(self.board)
+            return self.position.evaluate()
+        if self.position.halfmove >= 100 or self.position.insufficient_material():
+            return 0
+        if self._is_repetition(ply):
+            return 0
+
+        in_check = self.position.in_check()
+        if depth <= 0:
+            return self._quiescence(alpha, beta, ply, 0)
+        if in_check and depth <= 8:
+            depth += 1
 
         alpha = max(alpha, -MATE + ply)
         beta = min(beta, MATE - ply - 1)
         if alpha >= beta:
             return alpha
+        original_alpha = alpha
+        key = self.position.hash_key
+        tt_entry = self.tt.probe(key, ply)
+        tt_move = 0
+        static_eval = INF
+        if tt_entry is not None:
+            tt_depth, tt_score, tt_flag, tt_move, tt_eval = tt_entry
+            static_eval = tt_eval
+            if tt_depth >= depth and not pv_node:
+                if tt_flag == TT_EXACT:
+                    return tt_score
+                if tt_flag == TT_LOWER and tt_score >= beta:
+                    return beta
+                if tt_flag == TT_UPPER and tt_score <= alpha:
+                    return alpha
 
-        in_check = self.board.is_check()
-        tt_key = _tt_key(self.board, position_key)
-        entry = self._probe(tt_key)
-        tt_move = entry.move if entry is not None else None
-        if entry is not None and entry.depth >= depth:
-            tt_score = _score_from_tt(entry.score, ply)
-            if entry.flag == EXACT:
-                return max(alpha, min(beta, tt_score))
-            if entry.flag == LOWER and tt_score >= beta:
+        if in_check:
+            static_eval = -INF
+        elif static_eval == INF:
+            static_eval = self.position.evaluate()
+
+        if not pv_node and not in_check and depth <= 6 and static_eval < MATE_THRESHOLD:
+            margin = 85 * depth + 35 * depth * depth
+            if static_eval - margin >= beta:
                 return beta
-            if entry.flag == UPPER and tt_score <= alpha:
-                return alpha
 
-        static_eval = entry.static_eval if entry is not None else _evaluate(self.board)
-
-        if (
-            not pv_node
-            and not in_check
-            and depth <= 4
-            and static_eval - (95 + depth * 70) >= beta
-            and abs(beta) < MATE_TT_THRESHOLD
-        ):
-            return beta
-
-        own_nonpawn = self.board.occupied_co[self.board.turn]
-        own_nonpawn &= (
-            self.board.knights | self.board.bishops | self.board.rooks | self.board.queens
-        )
         if (
             allow_null
             and not pv_node
             and not in_check
             and depth >= 3
-            and own_nonpawn
-            and static_eval >= beta + 35
-            and abs(beta) < MATE_TT_THRESHOLD
+            and static_eval >= beta
+            and self.position.has_non_pawn_material(self.position.side)
+            and abs(beta) < MATE_THRESHOLD
         ):
-            margin = max(0, static_eval - beta)
-            reduction = 2 + depth // 5 + (1 if margin > 220 else 0)
-            reduction = min(4, reduction)
-            null_move = chess.Move.null()
-            child_key = self._push(null_move)
-            try:
-                null_score = -self._search(
-                    depth - 1 - reduction,
-                    -beta,
-                    -beta + 1,
-                    ply + 1,
-                    False,
-                    False,
-                    child_key,
-                    null_move,
-                )
-            finally:
-                self._pop(child_key)
+            reduction = 2 + int(depth >= 6 or static_eval - beta >= 180)
+            null_undo = self.position.make_null()
+            self.path_keys[ply + 1] = self.position.hash_key
+            null_score = -self._search(
+                max(0, depth - 1 - reduction), -beta, -beta + 1, ply + 1, False, False, 0
+            )
+            self.position.unmake_null(null_undo)
             if null_score >= beta:
-                if depth < 7:
+                if depth < 8:
                     return beta
                 verify = self._search(
-                    max(1, depth - reduction),
+                    depth - 1 - reduction,
                     beta - 1,
                     beta,
                     ply,
                     False,
                     False,
-                    position_key,
                     previous_move,
                 )
                 if verify >= beta:
                     return beta
 
-        search_depth = depth
-        if tt_move is None and not in_check and depth >= 5:
-            search_depth -= 1
+        if tt_move == 0 and not in_check and depth >= (7 if pv_node else 5):
+            depth -= 1
 
-        legal = list(self.board.legal_moves)
-        if not legal:
+        moves = self.position.generate_moves()
+        if not moves:
             return -MATE + ply if in_check else 0
+        ordered = self._order_moves(moves, tt_move, ply, previous_move)
+        best_move = 0
+        best_score = -INF
+        legal_count = 0
+        quiets_searched: list[int] = []
+        killer_one = self.killers[ply][0]
+        killer_two = self.killers[ply][1]
 
-        ordered = self._ordered_moves(legal, tt_move, ply, previous_move)
-        original_alpha = alpha
-        best_move: chess.Move | None = None
-        quiet_tried: list[chess.Move] = []
-        move_count = 0
         for move in ordered:
-            capture = self.board.is_capture(move)
-            promotion = move.promotion is not None
-            quiet = not capture and not promotion
-            gives_check = _gives_check_hint(self.board, move)
-            move_count += 1
-
+            captured = (move >> 15) & 7
+            promotion = (move >> 18) & 7
+            quiet = captured == NO_CAPTURE and promotion == PROMO_NONE
+            gives_check = self.position.gives_check_fast(move)
             if (
-                quiet
+                not pv_node
                 and not in_check
+                and depth <= 2
+                and legal_count >= 2
+                and quiet
                 and not gives_check
-                and search_depth <= 2
-                and move_count > 1
-                and static_eval + 115 * search_depth + 55 <= alpha
+                and move != tt_move
+                and move not in (killer_one, killer_two)
             ):
-                continue
-            if (
-                quiet
-                and not pv_node
-                and not in_check
-                and search_depth <= 4
-                and move_count > 7 + search_depth * 2
-            ):
-                continue
-            if capture and not in_check and search_depth <= 3 and move_count > 2:
-                see = _see_estimate(self.board, move)
-                if see < -85 * search_depth and not gives_check:
+                futility_margin = 95 + 105 * depth
+                move_bonus = max(0, self.position.positional_move_bonus(move))
+                if static_eval + futility_margin + move_bonus <= alpha:
                     continue
 
-            parent_color_index = 1 if self.board.turn == chess.WHITE else 0
-            child_key = self._push(move)
-            new_depth = search_depth - 1
-            try:
-                if move_count == 1:
+            undo = self.position.make_move(move)
+            if undo is None:
+                continue
+            legal_count += 1
+            self.path_keys[ply + 1] = self.position.hash_key
+            child_depth = depth - 1
+            score: int
+            if legal_count == 1:
+                score = -self._search(child_depth, -beta, -alpha, ply + 1, pv_node, True, move)
+            else:
+                reduction = 0
+                if quiet and depth >= 3 and legal_count >= 3 and not in_check and not gives_check:
+                    reduction = LMR_TABLE[min(64, depth)][min(64, legal_count)]
+                    history_score = self.history[self.position.side ^ 1][move & 63][
+                        (move >> 6) & 63
+                    ]
+                    if move in (killer_one, killer_two):
+                        reduction = max(0, reduction - 1)
+                    if history_score > 900:
+                        reduction = max(0, reduction - 1)
+                    elif history_score < -900:
+                        reduction += 1
+                    if pv_node:
+                        reduction = max(0, reduction - 1)
+                    reduction = min(reduction, max(0, child_depth - 1))
+                if reduction:
                     score = -self._search(
-                        new_depth,
-                        -beta,
-                        -alpha,
-                        ply + 1,
-                        pv_node,
-                        True,
-                        child_key,
-                        move,
+                        child_depth - reduction, -alpha - 1, -alpha, ply + 1, False, True, move
                     )
                 else:
-                    reduction = 0
-                    if (
-                        new_depth >= 2
-                        and move_count >= 4
-                        and quiet
-                        and not gives_check
-                        and not in_check
-                    ):
-                        reduction = 1
-                        if search_depth >= 6 and move_count >= 8:
-                            reduction += 1
-                        history = _HISTORY[parent_color_index][move.from_square][move.to_square]
-                        if history > 7000:
-                            reduction -= 1
-                        elif history < -5000 and search_depth >= 5:
-                            reduction += 1
-                        reduction = max(0, min(reduction, new_depth - 1))
-
-                    reduced_depth = max(0, new_depth - reduction)
+                    score = alpha + 1
+                if score > alpha:
                     score = -self._search(
-                        reduced_depth,
-                        -alpha - 1,
-                        -alpha,
-                        ply + 1,
-                        False,
-                        True,
-                        child_key,
-                        move,
+                        child_depth, -alpha - 1, -alpha, ply + 1, False, True, move
                     )
-                    if score > alpha and reduction > 0:
-                        score = -self._search(
-                            new_depth,
-                            -alpha - 1,
-                            -alpha,
-                            ply + 1,
-                            False,
-                            True,
-                            child_key,
-                            move,
-                        )
-                    if score > alpha and score < beta and pv_node:
-                        score = -self._search(
-                            new_depth,
-                            -beta,
-                            -alpha,
-                            ply + 1,
-                            True,
-                            True,
-                            child_key,
-                            move,
-                        )
-            finally:
-                self._pop(child_key)
+                    if pv_node and alpha < score < beta:
+                        score = -self._search(child_depth, -beta, -alpha, ply + 1, True, True, move)
+            self.position.unmake_move(move, undo)
 
-            if quiet:
-                quiet_tried.append(move)
-            if score >= beta:
-                if quiet:
-                    self._update_quiet_cutoff(move, quiet_tried, search_depth, ply, previous_move)
-                self._store(tt_key, search_depth, beta, LOWER, move, static_eval, ply)
-                return beta
-            if score > alpha:
-                alpha = score
-                best_move = move
-
-        flag = EXACT if alpha > original_alpha else UPPER
-        self._store(tt_key, search_depth, alpha, flag, best_move, static_eval, ply)
-        return alpha
-
-    def _root_search(self, depth: int, alpha: int, beta: int) -> tuple[int, chess.Move]:
-        root_tt_key = _tt_key(self.board, self.root_key)
-        entry = self._probe(root_tt_key)
-        tt_move = entry.move if entry is not None else self.root_best
-        legal = list(self.board.legal_moves)
-        if not legal:
-            raise ValueError("no legal moves")
-        ordered = self._ordered_moves(legal, tt_move, 0, None)
-        best_move = ordered[0]
-        best_score = -INF
-        local_alpha = alpha
-        for index, move in enumerate(ordered):
-            child_key = self._push(move)
-            try:
-                if index == 0:
-                    score = -self._search(
-                        depth - 1,
-                        -beta,
-                        -local_alpha,
-                        1,
-                        True,
-                        True,
-                        child_key,
-                        move,
-                    )
-                else:
-                    score = -self._search(
-                        depth - 1,
-                        -local_alpha - 1,
-                        -local_alpha,
-                        1,
-                        False,
-                        True,
-                        child_key,
-                        move,
-                    )
-                    if score > local_alpha and score < beta:
-                        score = -self._search(
-                            depth - 1,
-                            -beta,
-                            -local_alpha,
-                            1,
-                            True,
-                            True,
-                            child_key,
-                            move,
-                        )
-            finally:
-                self._pop(child_key)
             if score > best_score:
                 best_score = score
                 best_move = move
-            if score > local_alpha:
-                local_alpha = score
-                if local_alpha >= beta:
-                    break
-        self.root_best = best_move
-        self.root_score = best_score
-        return best_score, best_move
+            if score > alpha:
+                alpha = score
+            if alpha >= beta:
+                if quiet:
+                    self._record_quiet_cutoff(move, depth, ply, previous_move, quiets_searched)
+                self.tt.store(key, depth, beta, TT_LOWER, move, static_eval, ply)
+                return beta
+            if quiet:
+                quiets_searched.append(move)
 
-    def iterative_deepening(self, fallback: chess.Move) -> chess.Move:
-        best_move = fallback
-        best_score = 0
-        completed_depth = 0
-        for depth in range(1, 64):
-            if time.perf_counter_ns() >= self.deadline_ns:
-                break
-            try:
-                if depth >= 4 and completed_depth > 0 and abs(best_score) < MATE_TT_THRESHOLD:
-                    window = 40
-                    alpha = best_score - window
-                    beta = best_score + window
-                    while True:
-                        score, move = self._root_search(depth, alpha, beta)
-                        if score <= alpha:
-                            alpha = max(-INF, alpha - window)
-                            window *= 2
-                            continue
-                        if score >= beta:
-                            beta = min(INF, beta + window)
-                            window *= 2
-                            continue
-                        break
+        if legal_count == 0:
+            return -MATE + ply if in_check else 0
+        flag = TT_EXACT if alpha > original_alpha else TT_UPPER
+        self.tt.store(key, depth, alpha, flag, best_move, static_eval, ply)
+        return alpha
+
+    def _quiescence(self, alpha: int, beta: int, ply: int, qply: int) -> int:
+        self.nodes += 1
+        self._check_time()
+        if ply >= MAX_PLY - 2:
+            return self.position.evaluate()
+        if self.position.halfmove >= 100 or self._is_repetition(ply):
+            return 0
+        in_check = self.position.in_check()
+        if qply >= 18:
+            return -MATE + ply if in_check else self.position.evaluate()
+
+        if in_check:
+            stand_pat = -INF
+            moves = self.position.generate_moves()
+        else:
+            stand_pat = self.position.evaluate()
+            if stand_pat >= beta:
+                return beta
+            if stand_pat > alpha:
+                alpha = stand_pat
+            moves = self.position.generate_moves(tactical=True)
+
+        if not moves:
+            if in_check:
+                return -MATE + ply
+            if self.position.total_non_pawn_pieces() <= 2 and not self._has_any_legal_move():
+                return 0
+            return alpha
+
+        ordered = self._order_tactical(moves)
+        legal_count = 0
+        for move in ordered:
+            captured = (move >> 15) & 7
+            promotion = (move >> 18) & 7
+            gives_check = self.position.gives_check_fast(move)
+            see_score = self.position.see(move)
+            if not in_check and not promotion:
+                if see_score < -70 and not gives_check:
+                    continue
+                victim_gain = 0 if captured == NO_CAPTURE else NON_KING_VALUE[captured]
+                if stand_pat + victim_gain + 130 < alpha and not gives_check:
+                    continue
+            undo = self.position.make_move(move)
+            if undo is None:
+                continue
+            legal_count += 1
+            self.path_keys[ply + 1] = self.position.hash_key
+            score = -self._quiescence(-beta, -alpha, ply + 1, qply + 1)
+            self.position.unmake_move(move, undo)
+            if score >= beta:
+                return beta
+            if score > alpha:
+                alpha = score
+        if in_check and legal_count == 0:
+            return -MATE + ply
+        return alpha
+
+    def _order_moves(
+        self, moves: list[int], tt_move: int, ply: int, previous_move: int
+    ) -> list[int]:
+        side = self.position.side
+        counter = 0
+        if previous_move:
+            previous_piece = (previous_move >> 12) & 7
+            previous_to = (previous_move >> 6) & 63
+            previous_side = side ^ 1
+            counter = self.countermoves[previous_side * 6 + previous_piece][previous_to]
+        killer_one = self.killers[ply][0]
+        killer_two = self.killers[ply][1]
+        scored: list[tuple[int, int]] = []
+        for move in moves:
+            if move == tt_move:
+                score = 10_000_000
+            else:
+                captured = (move >> 15) & 7
+                promotion = (move >> 18) & 7
+                if captured != NO_CAPTURE or promotion:
+                    see_score = self.position.see(move)
+                    attacker = (move >> 12) & 7
+                    victim_value = 0 if captured == NO_CAPTURE else NON_KING_VALUE[captured]
+                    capture_order = victim_value * 16 - NON_KING_VALUE[attacker]
+                    if promotion:
+                        capture_order += 2_000 + promotion * 100
+                    score = (8_000_000 if see_score >= 0 else 1_000_000) + capture_order + see_score
+                elif move == killer_one:
+                    score = 7_000_000
+                elif move == killer_two:
+                    score = 6_900_000
+                elif move == counter:
+                    score = 6_800_000
                 else:
-                    score, move = self._root_search(depth, -INF, INF)
-            except _SearchTimeout:
-                break
-            best_move = move
-            best_score = score
-            completed_depth = depth
-            if abs(best_score) >= MATE - 2 * MAX_PLY:
-                break
-        return best_move
+                    from_square = move & 63
+                    to_square = (move >> 6) & 63
+                    history_score = self.history[side][from_square][to_square]
+                    score = (
+                        3_000_000
+                        + history_score
+                        + self.position.positional_move_bonus(move) * 32
+                    )
+            scored.append((score, move))
+        scored.sort(reverse=True)
+        return [move for _, move in scored]
+
+    def _order_tactical(self, moves: list[int]) -> list[int]:
+        scored: list[tuple[int, int]] = []
+        for move in moves:
+            captured = (move >> 15) & 7
+            attacker = (move >> 12) & 7
+            promotion = (move >> 18) & 7
+            victim = 0 if captured == NO_CAPTURE else NON_KING_VALUE[captured]
+            score = victim * 16 - NON_KING_VALUE[attacker] + self.position.see(move) * 2
+            if promotion:
+                score += 3_000 + 300 * promotion
+            if self.position.gives_check_fast(move):
+                score += 1_200
+            scored.append((score, move))
+        scored.sort(reverse=True)
+        return [move for _, move in scored]
+
+    def _record_quiet_cutoff(
+        self, move: int, depth: int, ply: int, previous_move: int, quiets_searched: list[int]
+    ) -> None:
+        if self.killers[ply][0] != move:
+            self.killers[ply][1] = self.killers[ply][0]
+            self.killers[ply][0] = move
+        side = self.position.side
+        from_square = move & 63
+        to_square = (move >> 6) & 63
+        bonus = min(2_000, depth * depth * 36 + 32)
+        self._update_history(side, from_square, to_square, bonus)
+        malus = min(700, depth * depth * 8)
+        for quiet in quiets_searched:
+            self._update_history(side, quiet & 63, (quiet >> 6) & 63, -malus)
+        if previous_move:
+            previous_piece = (previous_move >> 12) & 7
+            previous_to = (previous_move >> 6) & 63
+            previous_side = side ^ 1
+            self.countermoves[previous_side * 6 + previous_piece][previous_to] = move
+
+    def _update_history(self, side: int, from_square: int, to_square: int, bonus: int) -> None:
+        current = self.history[side][from_square][to_square]
+        updated = current + bonus - current * abs(bonus) // 16_384
+        self.history[side][from_square][to_square] = max(-16_000, min(16_000, updated))
+
+    def _is_repetition(self, ply: int) -> bool:
+        limit = max(0, ply - self.position.halfmove)
+        index = ply - 2
+        key = self.position.hash_key
+        while index >= limit:
+            if self.path_keys[index] == key:
+                return True
+            index -= 2
+        return False
+
+    def _has_any_legal_move(self) -> bool:
+        for move in self.position.generate_moves():
+            undo = self.position.make_move(move)
+            if undo is not None:
+                self.position.unmake_move(move, undo)
+                return True
+        return False
+
+    def _check_time(self, force: bool = False) -> None:
+        if force or not (self.nodes & self.time_check_mask):
+            if time.perf_counter_ns() >= self.deadline_ns:
+                raise SearchAbort
 
 
-def _allocate_time_ms(time_left_ms: int) -> int:
-    remaining = max(1, time_left_ms)
-    if remaining <= 80:
-        return max(1, remaining // 8)
-    reserve = max(20, min(1800, remaining // 16))
-    base = remaining // 30 + 450
-    if remaining < 3000:
-        base = min(base, max(8, remaining * 12 // 100))
-    hard_cap = max(5, remaining - reserve)
-    return max(5, min(base, hard_cap, remaining // 4))
+_ENGINE = Searcher()
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    global _LAST_ROOT_PLY, _TT_AGE
-    started = time.perf_counter_ns()
-    board = chess.Board(fen)
-    root_ply = (board.fullmove_number - 1) * 2 + (0 if board.turn == chess.WHITE else 1)
-    if _LAST_ROOT_PLY is not None and root_ply <= _LAST_ROOT_PLY:
-        _GAME_KEYS.clear()
-    _LAST_ROOT_PLY = root_ply
-    legal = list(board.legal_moves)
-    if not legal:
-        return "0000"
-    if len(legal) == 1:
-        return legal[0].uci()
-
-    root_key = _position_key(board)
-    if not _GAME_KEYS or _GAME_KEYS[-1] != root_key:
-        _GAME_KEYS.append(root_key)
-
-    _TT_AGE = (_TT_AGE + 1) & 0x7FFFFFFF
-    budget_ms = _allocate_time_ms(time_left_ms)
-    safety = 0.78 if budget_ms <= 25 else 0.90
-    deadline = started + int(budget_ms * safety * 1_000_000)
-    searcher = _Searcher(board, deadline, root_key)
-
-    fallback = legal[0]
-    if budget_ms >= 8:
-        try:
-            fallback = searcher._ordered_moves(legal, None, 0, None)[0]
-        except _SearchTimeout:
-            fallback = legal[0]
-    best = searcher.iterative_deepening(fallback) if budget_ms >= 12 else fallback
-
-    board.push(best)
-    child_key = _position_key(board)
-    board.pop()
-    if not _GAME_KEYS or _GAME_KEYS[-1] != child_key:
-        _GAME_KEYS.append(child_key)
-    return best.uci()
+    return _ENGINE.choose_move(fen, time_left_ms)
   </script>
 </body>
 </html>
