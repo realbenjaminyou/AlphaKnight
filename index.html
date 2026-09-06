@@ -478,13 +478,13 @@
         <span id="active-elo-badge" class="elo-badge">~1900 Elo</span>
       </div>
       <div class="selector-desc" id="engine-summary">
-        AlphaKnight Centrion: Full positioning evaluation, tapered endgame, and deep alpha-beta search.
+        AlphaKnight Centurion: Full positioning evaluation, tapered endgame, and deep alpha-beta search.
       </div>
     </div>
     <div class="selector-controls">
       <label for="engine-select" style="font-size:0.88rem; font-weight:600; color:var(--text-dim);">AI Model:</label>
       <select id="engine-select" onchange="onEngineChanged()" disabled>
-        <option value="centrion" selected>AlphaKnight Centrion (~1900 Elo)</option>
+        <option value="Centurion" selected>AlphaKnight Centurion (~1900 Elo)</option>
         <option value="templar">AlphaKnight Templar (~1700 Elo)</option>
         <option value="paladin">AlphaKnight Paladin (~1500 Elo)</option>
         <option value="trojan">AlphaKnight Trojan (~1200 Elo)</option>
@@ -510,7 +510,7 @@
           </div>
         </div>
         <div class="stats-grid">
-          <div>Engine: <span id="stat-engine">Centrion</span></div>
+          <div>Engine: <span id="stat-engine">Centurion</span></div>
           <div>Depth: <span id="stat-depth">-</span></div>
           <div>Nodes: <span id="stat-nodes">0</span></div>
           <div>Speed: <span id="stat-nps">- kn/s</span></div>
@@ -552,11 +552,11 @@
     };
 
     const ENGINE_METADATA = {
-      centrion: {
-        name: "AlphaKnight Centrion",
-        shortName: "Centrion",
+      Centurion: {
+        name: "AlphaKnight Centurion",
+        shortName: "Centurion",
         elo: "~1900 Elo",
-        summary: "AlphaKnight Centrion (~1900 Elo): Comprehensive tapered evaluation, piece-square tables, pawn phalanxes, king safety, SEE, killer/history heuristics, and aspiration search."
+        summary: "AlphaKnight Centurion (~1900 Elo): Comprehensive tapered evaluation, piece-square tables, pawn phalanxes, king safety, SEE, killer/history heuristics, and aspiration search."
       },
       templar: {
         name: "AlphaKnight Templar (AK 4)",
@@ -593,7 +593,7 @@
     let lastMove = { from: -1, to: -1 };
     let moveList = [];
     let pendingPromotion = null;
-    let currentEngineKey = "centrion";
+    let currentEngineKey = "Centurion";
 
     const boardEl = document.getElementById("board");
     const statusEl = document.getElementById("runtime-status");
@@ -688,7 +688,7 @@ def js_think(clock_ms):
     })
 `);
 
-        await switchEngine("centrion");
+        await switchEngine("Centurion");
 
         document.getElementById("btn-new").disabled = false;
         document.getElementById("user-side").disabled = false;
@@ -987,9 +987,9 @@ def js_think(clock_ms):
   </script>
 
   <!-- ========================================================================= -->
-  <!-- 1. ALPHAKNIGHT CENTRION (~1900 ELO) - EXACT SOURCE                        -->
+  <!-- 1. ALPHAKNIGHT Centurion (~1900 ELO) - EXACT SOURCE                        -->
   <!-- ========================================================================= -->
-  <script type="text/python" id="agent-centrion">
+  <script type="text/python" id="agent-Centurion">
 """Journeyman-style evaluation and search on AlphaKnight plumbing."""
 
 from __future__ import annotations
