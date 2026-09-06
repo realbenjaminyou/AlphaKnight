@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Play vs Alphaknight 2.0</title>
+  <title>Play vs Minimax Chessbot</title>
   <script src="https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js"></script>
   <style>
     :root {
@@ -140,7 +140,6 @@
       z-index: 5;
     }
 
-    /* UTF-8 Chess Piece Styling & Contrast Enhancements */
     .piece {
       font-size: clamp(34px, 7vw, 48px);
       line-height: 1;
@@ -152,7 +151,6 @@
       font-family: "Apple Symbols", "DejaVu Sans", "Segoe UI Symbol", "Noto Sans Symbols", sans-serif;
     }
 
-    /* White pieces: crisp light fill with bold dark border/shadow for light-square visibility */
     .piece.white-piece {
       color: #ffffff;
       text-shadow:
@@ -164,7 +162,6 @@
       filter: drop-shadow(0px 2px 2px rgba(0, 0, 0, 0.45));
     }
 
-    /* Black pieces: solid charcoal fill with soft subtle backlight for dark-square visibility */
     .piece.black-piece {
       color: #1a1a1a;
       text-shadow:
@@ -319,10 +316,10 @@
 
   <header>
     <div>
-      <h1>Alphaknight Chess</h1>
-      <div class="version">Self-Contained Tactical Python Engine (agent.py)</div>
+      <h1>AlphaKnight Trojan</h1>
+      <div class="version">Made by Benjamin You</div>
     </div>
-    <div id="runtime-status" class="status-badge status-loading">Loading Pyodide runtime...</div>
+    <div id="runtime-status" class="status-badge status-loading">Loading Pyodide & python-chess...</div>
   </header>
 
   <div class="main-container">
@@ -344,7 +341,7 @@
         <div class="stats-grid">
           <div>Depth: <span id="stat-depth">-</span></div>
           <div>Nodes: <span id="stat-nodes">0</span></div>
-          <div>Speed: <span id="stat-nps">- kn/s</span></div>
+          <div>Cutoffs: <span id="stat-nps">0</span></div>
           <div>Time: <span id="stat-time">0 ms</span></div>
         </div>
       </div>
@@ -362,10 +359,9 @@
             <option value="b">Play Black</option>
           </select>
           <select id="think-time" disabled>
-            <option value="200">Blitz (200 ms)</option>
-            <option value="500" selected>Standard (500 ms)</option>
-            <option value="1200">Tournament (1.2 s)</option>
-            <option value="3000">Deep (3.0 s)</option>
+            <option value="5000">Blitz (5 s clock)</option>
+            <option value="15000" selected>Rapid (15 s clock)</option>
+            <option value="60000">Classical (60 s clock)</option>
           </select>
         </div>
       </div>
@@ -377,20 +373,9 @@
   </div>
 
   <script>
-    // UTF-8 Chess Symbols Chart mapping
     const UNICODE_PIECES = {
-      K: "&#9812;", // ♔ 0x2654
-      Q: "&#9813;", // ♕ 0x2655
-      R: "&#9814;", // ♖ 0x2656
-      B: "&#9815;", // ♗ 0x2657
-      N: "&#9816;", // ♘ 0x2658
-      P: "&#9817;", // ♙ 0x2659
-      k: "&#9818;", // ♚ 0x265A
-      q: "&#9819;", // ♛ 0x265B
-      r: "&#9820;", // ♜ 0x265C
-      b: "&#9821;", // ♝ 0x265D
-      n: "&#9822;", // ♞ 0x265E
-      p: "&#9823;"  // ♟ 0x265F
+      K: "&#9812;", Q: "&#9813;", R: "&#9814;", B: "&#9815;", N: "&#9816;", P: "&#9817;",
+      k: "&#9818;", q: "&#9819;", r: "&#9820;", b: "&#9821;", n: "&#9822;", p: "&#9823;"
     };
 
     let pyodide = null;
@@ -409,48 +394,84 @@
     async function initPyodideRuntime() {
       try {
         pyodide = await loadPyodide();
-        statusEl.innerText = "Transpiling Alphaknight...";
+        statusEl.innerText = "Installing python-chess...";
+        await pyodide.loadPackage("micropip");
+        const micropip = pyodide.pyimport("micropip");
+        await micropip.install("chess");
 
+        statusEl.innerText = "Transpiling agent_2.py...";
         const agentScript = document.getElementById("agent-py-source").textContent;
         await pyodide.runPythonAsync(agentScript);
 
         await pyodide.runPythonAsync(`
 import json
+import chess
 
-bridge_engine = AlphaknightEngine()
+current_board = chess.Board()
 
 def js_set_fen(fen):
-    bridge_engine.board.set_fen(fen)
+    global current_board
+    current_board.set_fen(fen)
 
 def js_get_board_state():
-    b = bridge_engine.board
-    legal = [move_to_uci(m) for m in b.generate_legal()]
+    mailbox = [0] * 64
+    for sq in range(64):
+        p = current_board.piece_at(sq)
+        if p:
+            val = p.piece_type
+            mailbox[sq] = val if p.color == chess.WHITE else -val
+
+    legal = [m.uci() for m in current_board.legal_moves]
     return json.dumps({
-        "mailbox": b.mailbox,
-        "side": "w" if b.side == WHITE else "b",
-        "fen": b.fen(),
+        "mailbox": mailbox,
+        "side": "w" if current_board.turn == chess.WHITE else "b",
+        "fen": current_board.fen(),
         "legal": legal,
-        "is_draw": b.is_draw(),
-        "in_check": b.in_check()
+        "is_draw": current_board.is_checkmate() == False and current_board.is_game_over(),
+        "in_check": current_board.is_check()
     })
 
 def js_make_move(uci_str):
-    mv = bridge_engine.board.parse_uci(uci_str)
-    if mv:
-        bridge_engine.board.make_move(mv)
-        return True
+    try:
+        mv = chess.Move.from_uci(uci_str)
+        if mv in current_board.legal_moves:
+            current_board.push(mv)
+            return True
+    except:
+        pass
     return False
 
-def js_think(limit_ms):
-    limits = SearchLimits(depth=64, movetime_ms=limit_ms)
-    res = bridge_engine.searcher.think(bridge_engine.board, limits)
-    best_uci = move_to_uci(res.best_move)
+def js_think(clock_ms):
+    stats = SearchStats()
+    start_ns = time.monotonic_ns()
+    deadline_ns = _deadline_from_clock(clock_ms)
+
+    best_move = None
+    best_score = 0.0
+    searched_depth = 0
+
+    moves = _ordered_moves(current_board)
+    if moves:
+        best_move = moves[0]
+
+    for depth in range(1, MAX_SEARCH_DEPTH + 1):
+        try:
+            cand, score = _search_root(current_board, depth, deadline_ns=deadline_ns, stats=stats)
+            if cand is not None:
+                best_move = cand
+                best_score = score
+                searched_depth = depth
+        except SearchTimeout:
+            break
+
+    elapsed_ms = max(0, (time.monotonic_ns() - start_ns) // 1_000_000)
     return json.dumps({
-        "move": best_uci,
-        "score": res.score,
-        "depth": res.depth,
-        "nodes": res.nodes,
-        "time": res.elapsed_ms
+        "move": best_move.uci() if best_move else "0000",
+        "score": best_score,
+        "depth": searched_depth,
+        "nodes": stats.nodes,
+        "cutoffs": stats.cutoffs,
+        "time": elapsed_ms
     })
         `);
 
@@ -626,13 +647,13 @@ def js_think(limit_ms):
     }
 
     async function triggerEngineMove() {
-      statusEl.innerText = "Alphaknight thinking...";
+      statusEl.innerText = "Minimax thinking...";
       statusEl.className = "status-badge status-thinking";
 
-      const timeLimit = parseInt(document.getElementById("think-time").value, 10);
+      const clockMs = parseInt(document.getElementById("think-time").value, 10);
 
       setTimeout(() => {
-        const resJson = pyodide.globals.get("js_think")(timeLimit);
+        const resJson = pyodide.globals.get("js_think")(clockMs);
         const res = JSON.parse(resJson);
 
         if (res.move && res.move !== "0000") {
@@ -649,17 +670,16 @@ def js_think(limit_ms):
       document.getElementById("stat-depth").innerText = info.depth;
       document.getElementById("stat-nodes").innerText = info.nodes.toLocaleString();
       document.getElementById("stat-time").innerText = `${info.time} ms`;
-      const knps = info.time > 0 ? (info.nodes / info.time).toFixed(1) : 0;
-      document.getElementById("stat-nps").innerText = `${knps} kn/s`;
+      document.getElementById("stat-nps").innerText = `${info.cutoffs}`;
 
       let cp = info.score;
       if (playerColor === "b") cp = -cp;
-      const evalText = Math.abs(cp) > 29000
-        ? `Mate in ${30000 - Math.abs(cp)}`
-        : (cp / 100).toFixed(2);
+      const evalText = Math.abs(cp) >= 50000
+        ? `Mate`
+        : (cp >= 0 ? `+${cp.toFixed(1)}` : cp.toFixed(1));
       document.getElementById("eval-label").innerText = evalText;
 
-      const evalPercent = 50 + 50 * (2 / (1 + Math.exp(-0.003 * cp)) - 1);
+      const evalPercent = 50 + 50 * (2 / (1 + Math.exp(-0.35 * cp)) - 1);
       document.getElementById("meter-white").style.width = `${Math.max(5, Math.min(95, evalPercent))}%`;
     }
 
@@ -698,6 +718,7 @@ def js_think(limit_ms):
     }
 
     function getPieceChar(p) {
+      // 1: P, 2: N, 3: B, 4: R, 5: Q, 6: K
       const map = { 1: "P", 2: "N", 3: "B", 4: "R", 5: "Q", 6: "K", "-1": "p", "-2": "n", "-3": "b", "-4": "r", "-5": "q", "-6": "k" };
       return map[p] || "";
     }
@@ -713,1781 +734,279 @@ def js_think(limit_ms):
     window.addEventListener("DOMContentLoaded", initPyodideRuntime);
   </script>
 
-  <!-- Complete Inlined Python Engine Source -->
+  <!-- Complete Inlined Python Engine Source (agent_2.py) -->
   <script type="text/python" id="agent-py-source">
-"""Alphaknight: a self-contained tactical chess engine with UCI support."""
+"""AI Chessathon agent: material minimax with alpha-beta pruning."""
 
 from __future__ import annotations
 
-from array import array
-from dataclasses import dataclass
 import math
-import sys
-import threading
 import time
-from typing import Iterable, Iterator
+from dataclasses import dataclass
 
-ENGINE_NAME = "Alphaknight"
-ENGINE_VERSION = "2.0"
-START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+import chess
 
-WHITE, BLACK = 0, 1
-PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING = range(6)
-EMPTY = 0
+MAX_SEARCH_DEPTH = 3
+MAX_THINK_TIME_MS = 1_000
+CLOCK_FRACTION = 0.05
+CLOCK_RESERVE_MS = 25
 
-PIECE_TO_CHAR = {
-    1: "P", 2: "N", 3: "B", 4: "R", 5: "Q", 6: "K",
-    -1: "p", -2: "n", -3: "b", -4: "r", -5: "q", -6: "k",
+MATE_SCORE = 100_000
+NO_MOVE = "0000"
+
+PIECE_VALUE: dict[chess.PieceType, int] = {
+    chess.PAWN: 1,
+    chess.KNIGHT: 3,
+    chess.BISHOP: 3,
+    chess.ROOK: 5,
+    chess.QUEEN: 9,
+    chess.KING: 1_000,
 }
-CHAR_TO_PIECE = {v: k for k, v in PIECE_TO_CHAR.items()}
 
-MATERIAL = (100, 325, 340, 510, 960, 0)
-SEE_VALUE = (109, 403, 435, 679, 1242, 20_000)
-MATE_SCORE = 30_000
-MATE_BOUND = 29_000
-INF = 32_000
-MAX_PLY = 128
-CONTEMPT = 18
 
-CASTLE_WK = 1
-CASTLE_WQ = 2
-CASTLE_BK = 4
-CASTLE_BQ = 8
+class SearchTimeout(Exception):
+    """Raised internally when the current search iteration runs out of time."""
 
-FLAG_CAPTURE = 1 << 15
-FLAG_EP = 1 << 16
-FLAG_CASTLE = 1 << 17
-FLAG_DOUBLE = 1 << 18
-PROMO_SHIFT = 12
-PROMO_MASK = 0x7 << PROMO_SHIFT
-FROM_MASK = 0x3F
-TO_MASK = 0x3F << 6
 
-BOUND_NONE = 0
-BOUND_EXACT = 1
-BOUND_LOWER = 2
-BOUND_UPPER = 3
+@dataclass
+class SearchStats:
+    """Optional counters used by focused tests and local profiling."""
 
-FILE_A = 0x0101010101010101
-FILE_H = 0x8080808080808080
-RANK_1 = 0x00000000000000FF
-RANK_2 = 0x000000000000FF00
-RANK_3 = 0x0000000000FF0000
-RANK_4 = 0x00000000FF000000
-RANK_5 = 0x000000FF00000000
-RANK_6 = 0x0000FF0000000000
-RANK_7 = 0x00FF000000000000
-RANK_8 = 0xFF00000000000000
-CENTER4 = (1 << 27) | (1 << 28) | (1 << 35) | (1 << 36)
-EXT_CENTER = sum(1 << sq for sq in (18, 19, 20, 21, 26, 27, 28, 29, 34, 35, 36, 37, 42, 43, 44, 45))
-ALL64 = (1 << 64) - 1
+    nodes: int = 0
+    cutoffs: int = 0
 
 
-def bit(sq: int) -> int:
-    return 1 << sq
-
-
-def file_of(sq: int) -> int:
-    return sq & 7
-
-
-def rank_of(sq: int) -> int:
-    return sq >> 3
-
-
-def square_name(sq: int) -> str:
-    return chr(97 + file_of(sq)) + chr(49 + rank_of(sq))
-
-
-def parse_square(text: str) -> int:
-    if len(text) != 2 or text[0] < "a" or text[0] > "h" or text[1] < "1" or text[1] > "8":
-        raise ValueError(f"invalid square: {text}")
-    return (ord(text[1]) - 49) * 8 + ord(text[0]) - 97
-
-
-def popcount(bb: int) -> int:
-    return bb.bit_count()
-
-
-def lsb(bb: int) -> int:
-    return (bb & -bb).bit_length() - 1
-
-
-def iter_bits(bb: int) -> Iterator[int]:
-    while bb:
-        b = bb & -bb
-        yield b.bit_length() - 1
-        bb ^= b
-
-
-def piece_side(piece: int) -> int:
-    return WHITE if piece > 0 else BLACK
-
-
-def piece_type(piece: int) -> int:
-    return abs(piece) - 1
-
-
-def piece_code(side: int, ptype: int) -> int:
-    return ptype + 1 if side == WHITE else -(ptype + 1)
-
-
-def bb_index(side: int, ptype: int) -> int:
-    return ptype * 2 + side
-
-
-def encode_move(frm: int, to: int, promo: int = 0, flags: int = 0) -> int:
-    return frm | (to << 6) | ((promo & 7) << PROMO_SHIFT) | flags
-
-
-def move_from(mv: int) -> int:
-    return mv & FROM_MASK
-
-
-def move_to(mv: int) -> int:
-    return (mv >> 6) & 63
-
-
-def move_promo(mv: int) -> int:
-    return (mv >> PROMO_SHIFT) & 7
-
-
-def is_capture_move(mv: int) -> bool:
-    return bool(mv & FLAG_CAPTURE)
-
-
-def is_castle_move(mv: int) -> bool:
-    return bool(mv & FLAG_CASTLE)
-
-
-def move_to_uci(mv: int) -> str:
-    if not mv:
-        return "0000"
-    text = square_name(move_from(mv)) + square_name(move_to(mv))
-    promo = move_promo(mv)
-    if promo:
-        text += " nbrq"[promo]
-    return text
-
-
-KNIGHT_ATTACKS = [0] * 64
-KING_ATTACKS = [0] * 64
-PAWN_ATTACKS = [[0] * 64 for _ in range(2)]
-
-for sq in range(64):
-    f, r = file_of(sq), rank_of(sq)
-    bb = 0
-    for df, dr in ((1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)):
-        nf, nr = f + df, r + dr
-        if 0 <= nf < 8 and 0 <= nr < 8:
-            bb |= bit(nr * 8 + nf)
-    KNIGHT_ATTACKS[sq] = bb
-    bb = 0
-    for df in (-1, 0, 1):
-        for dr in (-1, 0, 1):
-            if df == dr == 0:
-                continue
-            nf, nr = f + df, r + dr
-            if 0 <= nf < 8 and 0 <= nr < 8:
-                bb |= bit(nr * 8 + nf)
-    KING_ATTACKS[sq] = bb
-    for side, dr in ((WHITE, 1), (BLACK, -1)):
-        bb = 0
-        for df in (-1, 1):
-            nf, nr = f + df, r + dr
-            if 0 <= nf < 8 and 0 <= nr < 8:
-                bb |= bit(nr * 8 + nf)
-        PAWN_ATTACKS[side][sq] = bb
-
-RANK_MASKS = [0] * 64
-FILE_MASKS = [0] * 64
-DIAG_MASKS = [0] * 64
-ANTI_MASKS = [0] * 64
-for sq in range(64):
-    f0, r0 = file_of(sq), rank_of(sq)
-    RANK_MASKS[sq] = 0xFF << (r0 * 8)
-    FILE_MASKS[sq] = FILE_A << f0
-    d = 0
-    a = 0
-    for t in range(64):
-        f, r = file_of(t), rank_of(t)
-        if f - r == f0 - r0:
-            d |= bit(t)
-        if f + r == f0 + r0:
-            a |= bit(t)
-    DIAG_MASKS[sq] = d
-    ANTI_MASKS[sq] = a
-
-_REV8 = [int(f"{i:08b}"[::-1], 2) for i in range(256)]
-
-
-def _reverse64(x: int) -> int:
-    return (
-        (_REV8[x & 0xFF] << 56)
-        | (_REV8[(x >> 8) & 0xFF] << 48)
-        | (_REV8[(x >> 16) & 0xFF] << 40)
-        | (_REV8[(x >> 24) & 0xFF] << 32)
-        | (_REV8[(x >> 32) & 0xFF] << 24)
-        | (_REV8[(x >> 40) & 0xFF] << 16)
-        | (_REV8[(x >> 48) & 0xFF] << 8)
-        | _REV8[(x >> 56) & 0xFF]
-    )
-
-
-def _line_attacks(sq: int, occ: int, mask: int) -> int:
-    piece = bit(sq)
-    line = occ & mask
-    forward = (line - ((piece << 1) & ALL64)) & ALL64
-    rline = _reverse64(line)
-    rpiece = _reverse64(piece)
-    backward = _reverse64((rline - ((rpiece << 1) & ALL64)) & ALL64)
-    return (forward ^ backward) & mask
-
-
-def rook_attacks(sq: int, occ: int) -> int:
-    return _line_attacks(sq, occ, RANK_MASKS[sq]) | _line_attacks(sq, occ, FILE_MASKS[sq])
-
-
-def bishop_attacks(sq: int, occ: int) -> int:
-    return _line_attacks(sq, occ, DIAG_MASKS[sq]) | _line_attacks(sq, occ, ANTI_MASKS[sq])
-
-
-def queen_attacks(sq: int, occ: int) -> int:
-    return rook_attacks(sq, occ) | bishop_attacks(sq, occ)
-
-
-def _splitmix64_sequence(count: int) -> list[int]:
-    state = 0xFFAA_B58C_5833_FE89
-    out: list[int] = []
-    for _ in range(count):
-        state = (state + 0x9E37_79B9_7F4A_7C15) & ALL64
-        z = state
-        z = ((z ^ (z >> 30)) * 0xBF58_476D_1CE4_E5B9) & ALL64
-        z = ((z ^ (z >> 27)) * 0x94D0_49BB_1331_11EB) & ALL64
-        out.append((z ^ (z >> 31)) & ALL64)
-    return out
-
-
-_Z = _splitmix64_sequence(865)
-Z_PIECE = _Z[:768]
-Z_EP = _Z[768:832]
-Z_CASTLE = _Z[832:848]
-Z_SIDE = _Z[848]
-Z_FIFTY = _Z[849:865]
-
-
-def fifty_bucket(clock: int) -> int:
-    return min(max(clock - 8, 0) // 8, 15)
-
-
-@dataclass(slots=True)
-class Undo:
-    move: int
-    captured: int
-    castling: int
-    ep: int
-    halfmove: int
-    fullmove: int
-    rep_key: int
-    key: int
-    king_w: int
-    king_b: int
-
-
-class Board:
-    __slots__ = (
-        "mailbox", "bbs", "occ", "all_occ", "side", "castling", "ep", "halfmove",
-        "fullmove", "king_sq", "rep_key", "key", "stack", "rep_history",
-    )
-
-    def __init__(self, fen: str = START_FEN) -> None:
-        self.mailbox = [0] * 64
-        self.bbs = [0] * 12
-        self.occ = [0, 0]
-        self.all_occ = 0
-        self.side = WHITE
-        self.castling = 0
-        self.ep = -1
-        self.halfmove = 0
-        self.fullmove = 1
-        self.king_sq = [-1, -1]
-        self.rep_key = 0
-        self.key = 0
-        self.stack: list[Undo] = []
-        self.rep_history: list[int] = []
-        self.set_fen(fen)
-
-    def clone(self) -> "Board":
-        other = object.__new__(Board)
-        other.mailbox = self.mailbox.copy()
-        other.bbs = self.bbs.copy()
-        other.occ = self.occ.copy()
-        other.all_occ = self.all_occ
-        other.side = self.side
-        other.castling = self.castling
-        other.ep = self.ep
-        other.halfmove = self.halfmove
-        other.fullmove = self.fullmove
-        other.king_sq = self.king_sq.copy()
-        other.rep_key = self.rep_key
-        other.key = self.key
-        other.stack = self.stack.copy()
-        other.rep_history = self.rep_history.copy()
-        return other
-
-    def set_fen(self, fen: str) -> None:
-        fields = fen.strip().split()
-        if len(fields) < 4:
-            raise ValueError("FEN needs at least four fields")
-        placement, stm, rights, ep = fields[:4]
-        self.mailbox[:] = [0] * 64
-        self.bbs[:] = [0] * 12
-        self.occ[:] = [0, 0]
-        self.all_occ = 0
-        self.king_sq[:] = [-1, -1]
-        ranks = placement.split("/")
-        if len(ranks) != 8:
-            raise ValueError("invalid FEN board")
-        for fen_rank, row in enumerate(ranks):
-            rank = 7 - fen_rank
-            file = 0
-            for ch in row:
-                if ch.isdigit():
-                    file += int(ch)
-                    continue
-                if ch not in CHAR_TO_PIECE or file >= 8:
-                    raise ValueError("invalid FEN piece placement")
-                sq = rank * 8 + file
-                piece = CHAR_TO_PIECE[ch]
-                self._put_piece(sq, piece)
-                file += 1
-            if file != 8:
-                raise ValueError("invalid FEN rank")
-        self.side = WHITE if stm == "w" else BLACK if stm == "b" else -1
-        if self.side < 0:
-            raise ValueError("invalid side to move")
-        self.castling = 0
-        if "K" in rights: self.castling |= CASTLE_WK
-        if "Q" in rights: self.castling |= CASTLE_WQ
-        if "k" in rights: self.castling |= CASTLE_BK
-        if "q" in rights: self.castling |= CASTLE_BQ
-        self.ep = -1 if ep == "-" else parse_square(ep)
-        self.halfmove = int(fields[4]) if len(fields) > 4 else 0
-        self.fullmove = int(fields[5]) if len(fields) > 5 else 1
-        if self.king_sq[WHITE] < 0 or self.king_sq[BLACK] < 0:
-            raise ValueError("both kings are required")
-        self.stack.clear()
-        self.rep_key = self._compute_rep_key()
-        self.key = self.rep_key ^ Z_FIFTY[fifty_bucket(self.halfmove)]
-        self.rep_history = [self.rep_key]
-
-    def fen(self) -> str:
-        rows: list[str] = []
-        for rank in range(7, -1, -1):
-            empty = 0
-            row = ""
-            for file in range(8):
-                piece = self.mailbox[rank * 8 + file]
-                if piece == 0:
-                    empty += 1
-                else:
-                    if empty:
-                        row += str(empty)
-                        empty = 0
-                    row += PIECE_TO_CHAR[piece]
-            if empty:
-                row += str(empty)
-            rows.append(row)
-        rights = ""
-        if self.castling & CASTLE_WK: rights += "K"
-        if self.castling & CASTLE_WQ: rights += "Q"
-        if self.castling & CASTLE_BK: rights += "k"
-        if self.castling & CASTLE_BQ: rights += "q"
-        if not rights: rights = "-"
-        ep = "-" if self.ep < 0 else square_name(self.ep)
-        return f"{'/'.join(rows)} {'w' if self.side == WHITE else 'b'} {rights} {ep} {self.halfmove} {self.fullmove}"
-
-    def position_key4(self) -> tuple[str, str, str, str]:
-        fields = self.fen().split()
-        return fields[0], fields[1], fields[2], fields[3]
-
-    def _put_piece(self, sq: int, piece: int) -> None:
-        self.mailbox[sq] = piece
-        side = piece_side(piece)
-        ptype = piece_type(piece)
-        mask = bit(sq)
-        self.bbs[bb_index(side, ptype)] |= mask
-        self.occ[side] |= mask
-        self.all_occ |= mask
-        if ptype == KING:
-            self.king_sq[side] = sq
-
-    def _remove_piece(self, sq: int) -> int:
-        piece = self.mailbox[sq]
-        if not piece:
-            return 0
-        side = piece_side(piece)
-        ptype = piece_type(piece)
-        mask = bit(sq)
-        self.mailbox[sq] = 0
-        self.bbs[bb_index(side, ptype)] &= ~mask
-        self.occ[side] &= ~mask
-        self.all_occ &= ~mask
-        return piece
-
-    def _move_piece(self, frm: int, to: int) -> int:
-        piece = self._remove_piece(frm)
-        self._put_piece(to, piece)
-        return piece
-
-    def _compute_rep_key(self) -> int:
-        k = 0
-        for sq, piece in enumerate(self.mailbox):
-            if piece:
-                ptype = piece_type(piece)
-                side = piece_side(piece)
-                pidx = ptype * 2 + side
-                k ^= Z_PIECE[pidx * 64 + sq]
-        k ^= Z_CASTLE[self.castling]
-        if self.ep >= 0:
-            k ^= Z_EP[self.ep]
-        if self.side == BLACK:
-            k ^= Z_SIDE
-        return k & ALL64
-
-    def _refresh_key(self) -> None:
-        self.key = self.rep_key ^ Z_FIFTY[fifty_bucket(self.halfmove)]
-
-    def piece_bb(self, side: int, ptype: int) -> int:
-        return self.bbs[bb_index(side, ptype)]
-
-    def attacks_from(self, sq: int, piece: int, occ: int | None = None) -> int:
-        ptype = piece_type(piece)
-        side = piece_side(piece)
-        occupied = self.all_occ if occ is None else occ
-        if ptype == PAWN:
-            return PAWN_ATTACKS[side][sq]
-        if ptype == KNIGHT:
-            return KNIGHT_ATTACKS[sq]
-        if ptype == BISHOP:
-            return bishop_attacks(sq, occupied)
-        if ptype == ROOK:
-            return rook_attacks(sq, occupied)
-        if ptype == QUEEN:
-            return queen_attacks(sq, occupied)
-        return KING_ATTACKS[sq]
-
-    def attackers_to(self, sq: int, by_side: int, occ: int | None = None, bbs: list[int] | None = None) -> int:
-        occupied = self.all_occ if occ is None else occ
-        pieces = self.bbs if bbs is None else bbs
-        attackers = 0
-        attackers |= PAWN_ATTACKS[1 - by_side][sq] & pieces[bb_index(by_side, PAWN)]
-        attackers |= KNIGHT_ATTACKS[sq] & pieces[bb_index(by_side, KNIGHT)]
-        attackers |= KING_ATTACKS[sq] & pieces[bb_index(by_side, KING)]
-        diag = bishop_attacks(sq, occupied)
-        attackers |= diag & (pieces[bb_index(by_side, BISHOP)] | pieces[bb_index(by_side, QUEEN)])
-        ortho = rook_attacks(sq, occupied)
-        attackers |= ortho & (pieces[bb_index(by_side, ROOK)] | pieces[bb_index(by_side, QUEEN)])
-        return attackers
-
-    def is_square_attacked(self, sq: int, by_side: int) -> bool:
-        return bool(self.attackers_to(sq, by_side))
-
-    def in_check(self, side: int | None = None) -> bool:
-        s = self.side if side is None else side
-        return self.is_square_attacked(self.king_sq[s], 1 - s)
-
-    def all_attacks(self, side: int) -> int:
-        attacks = 0
-        for ptype in range(6):
-            bb = self.piece_bb(side, ptype)
-            for sq in iter_bits(bb):
-                attacks |= self.attacks_from(sq, piece_code(side, ptype))
-        return attacks
-
-    def generate_pseudo(self, captures_only: bool = False, include_checks: bool = False) -> list[int]:
-        side = self.side
-        enemy = 1 - side
-        own_occ = self.occ[side]
-        enemy_occ = self.occ[enemy]
-        moves: list[int] = []
-
-        pawns = self.piece_bb(side, PAWN)
-        direction = 8 if side == WHITE else -8
-        start_rank = 1 if side == WHITE else 6
-        promo_rank = 6 if side == WHITE else 1
-        for frm in iter_bits(pawns):
-            r = rank_of(frm)
-            targets = PAWN_ATTACKS[side][frm]
-            for to in iter_bits(targets):
-                target = self.mailbox[to]
-                if target and piece_side(target) == enemy:
-                    if r == promo_rank:
-                        for promo in (4, 3, 2, 1):
-                            moves.append(encode_move(frm, to, promo, FLAG_CAPTURE))
-                    else:
-                        moves.append(encode_move(frm, to, 0, FLAG_CAPTURE))
-                elif to == self.ep:
-                    moves.append(encode_move(frm, to, 0, FLAG_CAPTURE | FLAG_EP))
-            if captures_only:
-                continue
-            to = frm + direction
-            if 0 <= to < 64 and self.mailbox[to] == EMPTY:
-                if r == promo_rank:
-                    for promo in (4, 3, 2, 1):
-                        moves.append(encode_move(frm, to, promo, 0))
-                else:
-                    moves.append(encode_move(frm, to))
-                    if r == start_rank:
-                        to2 = frm + 2 * direction
-                        if self.mailbox[to2] == EMPTY:
-                            moves.append(encode_move(frm, to2, 0, FLAG_DOUBLE))
-
-        for ptype, attack_fn in ((KNIGHT, None), (BISHOP, bishop_attacks), (ROOK, rook_attacks), (QUEEN, queen_attacks), (KING, None)):
-            bb = self.piece_bb(side, ptype)
-            for frm in iter_bits(bb):
-                if ptype == KNIGHT:
-                    targets = KNIGHT_ATTACKS[frm]
-                elif ptype == KING:
-                    targets = KING_ATTACKS[frm]
-                else:
-                    targets = attack_fn(frm, self.all_occ)
-                targets &= ~own_occ
-                if captures_only:
-                    targets &= enemy_occ
-                for to in iter_bits(targets):
-                    flags = FLAG_CAPTURE if self.mailbox[to] else 0
-                    moves.append(encode_move(frm, to, 0, flags))
-
-        if not captures_only:
-            if side == WHITE and self.king_sq[WHITE] == 4 and not self.in_check(WHITE):
-                if self.castling & CASTLE_WK and self.mailbox[5] == self.mailbox[6] == 0:
-                    if self.mailbox[7] == piece_code(WHITE, ROOK) and not self.is_square_attacked(5, BLACK) and not self.is_square_attacked(6, BLACK):
-                        moves.append(encode_move(4, 6, 0, FLAG_CASTLE))
-                if self.castling & CASTLE_WQ and self.mailbox[1] == self.mailbox[2] == self.mailbox[3] == 0:
-                    if self.mailbox[0] == piece_code(WHITE, ROOK) and not self.is_square_attacked(3, BLACK) and not self.is_square_attacked(2, BLACK):
-                        moves.append(encode_move(4, 2, 0, FLAG_CASTLE))
-            elif side == BLACK and self.king_sq[BLACK] == 60 and not self.in_check(BLACK):
-                if self.castling & CASTLE_BK and self.mailbox[61] == self.mailbox[62] == 0:
-                    if self.mailbox[63] == piece_code(BLACK, ROOK) and not self.is_square_attacked(61, WHITE) and not self.is_square_attacked(62, WHITE):
-                        moves.append(encode_move(60, 62, 0, FLAG_CASTLE))
-                if self.castling & CASTLE_BQ and self.mailbox[57] == self.mailbox[58] == self.mailbox[59] == 0:
-                    if self.mailbox[56] == piece_code(BLACK, ROOK) and not self.is_square_attacked(59, WHITE) and not self.is_square_attacked(58, WHITE):
-                        moves.append(encode_move(60, 58, 0, FLAG_CASTLE))
-
-        if include_checks and captures_only:
-            for mv in self.generate_pseudo(False, False):
-                if is_capture_move(mv):
-                    continue
-                if self.move_gives_check(mv):
-                    moves.append(mv)
-        return moves
-
-    def generate_legal(self, captures_only: bool = False, include_checks: bool = False) -> list[int]:
-        legal: list[int] = []
-        seen: set[int] | None = set() if include_checks else None
-        for mv in self.generate_pseudo(captures_only, include_checks):
-            if seen is not None:
-                if mv in seen:
-                    continue
-                seen.add(mv)
-            mover = self.side
-            if self.make_move(mv):
-                illegal = self.in_check(mover)
-                self.undo_move()
-                if not illegal:
-                    legal.append(mv)
-        return legal
-
-    def parse_uci(self, text: str) -> int:
-        text = text.strip().lower()
-        if len(text) not in (4, 5):
-            return 0
-        try:
-            frm = parse_square(text[:2])
-            to = parse_square(text[2:4])
-        except ValueError:
-            return 0
-        promo_char = text[4] if len(text) == 5 else ""
-        for mv in self.generate_legal():
-            if move_from(mv) == frm and move_to(mv) == to:
-                promo = move_promo(mv)
-                if (not promo and not promo_char) or (promo and " nbrq"[promo] == promo_char):
-                    return mv
-        return 0
-
-    def _castle_rights_after(self, frm: int, to: int, moved: int, captured: int) -> int:
-        rights = self.castling
-        if piece_type(moved) == KING:
-            rights &= ~(CASTLE_WK | CASTLE_WQ) if piece_side(moved) == WHITE else ~(CASTLE_BK | CASTLE_BQ)
-        if piece_type(moved) == ROOK:
-            if frm == 0: rights &= ~CASTLE_WQ
-            elif frm == 7: rights &= ~CASTLE_WK
-            elif frm == 56: rights &= ~CASTLE_BQ
-            elif frm == 63: rights &= ~CASTLE_BK
-        if captured and piece_type(captured) == ROOK:
-            if to == 0: rights &= ~CASTLE_WQ
-            elif to == 7: rights &= ~CASTLE_WK
-            elif to == 56: rights &= ~CASTLE_BQ
-            elif to == 63: rights &= ~CASTLE_BK
-        return rights
-
-    def make_move(self, mv: int) -> bool:
-        if not mv:
-            return False
-        frm, to = move_from(mv), move_to(mv)
-        moved = self.mailbox[frm]
-        if not moved or piece_side(moved) != self.side:
-            return False
-        captured_sq = to
-        captured = self.mailbox[to]
-        if mv & FLAG_EP:
-            captured_sq = to - 8 if self.side == WHITE else to + 8
-            captured = self.mailbox[captured_sq]
-        self.stack.append(Undo(mv, captured, self.castling, self.ep, self.halfmove, self.fullmove, self.rep_key, self.key, self.king_sq[0], self.king_sq[1]))
-
-        self.rep_key ^= Z_CASTLE[self.castling]
-        if self.ep >= 0:
-            self.rep_key ^= Z_EP[self.ep]
-        self.ep = -1
-
-        ptype = piece_type(moved)
-        side = self.side
-        pidx = ptype * 2 + side
-        self.rep_key ^= Z_PIECE[pidx * 64 + frm]
-        self._remove_piece(frm)
-
-        if captured:
-            cside = piece_side(captured)
-            ctype = piece_type(captured)
-            self.rep_key ^= Z_PIECE[(ctype * 2 + cside) * 64 + captured_sq]
-            self._remove_piece(captured_sq)
-
-        promo = move_promo(mv)
-        placed = moved
-        if promo:
-            placed = piece_code(side, (KNIGHT, BISHOP, ROOK, QUEEN)[promo - 1])
-        self._put_piece(to, placed)
-        new_type = piece_type(placed)
-        self.rep_key ^= Z_PIECE[(new_type * 2 + side) * 64 + to]
-
-        if mv & FLAG_CASTLE:
-            if to == 6:
-                rook_from, rook_to = 7, 5
-            elif to == 2:
-                rook_from, rook_to = 0, 3
-            elif to == 62:
-                rook_from, rook_to = 63, 61
-            else:
-                rook_from, rook_to = 56, 59
-            rook = self.mailbox[rook_from]
-            rside = piece_side(rook)
-            self.rep_key ^= Z_PIECE[(ROOK * 2 + rside) * 64 + rook_from]
-            self._move_piece(rook_from, rook_to)
-            self.rep_key ^= Z_PIECE[(ROOK * 2 + rside) * 64 + rook_to]
-
-        self.castling = self._castle_rights_after(frm, to, moved, captured)
-        self.rep_key ^= Z_CASTLE[self.castling]
-        if mv & FLAG_DOUBLE:
-            self.ep = frm + 8 if side == WHITE else frm - 8
-            self.rep_key ^= Z_EP[self.ep]
-
-        if ptype == PAWN or captured:
-            self.halfmove = 0
-        else:
-            self.halfmove += 1
-        if side == BLACK:
-            self.fullmove += 1
-        self.side = 1 - self.side
-        self.rep_key ^= Z_SIDE
-        self.rep_key &= ALL64
-        self._refresh_key()
-        self.rep_history.append(self.rep_key)
-        return True
-
-    def undo_move(self) -> None:
-        undo = self.stack.pop()
-        mv = undo.move
-        self.rep_history.pop()
-        frm, to = move_from(mv), move_to(mv)
-        self.side = 1 - self.side
-        self.castling = undo.castling
-        self.ep = undo.ep
-        self.halfmove = undo.halfmove
-        self.fullmove = undo.fullmove
-
-        if mv & FLAG_CASTLE:
-            if to == 6:
-                rook_from, rook_to = 7, 5
-            elif to == 2:
-                rook_from, rook_to = 0, 3
-            elif to == 62:
-                rook_from, rook_to = 63, 61
-            else:
-                rook_from, rook_to = 56, 59
-            self._move_piece(rook_to, rook_from)
-
-        placed = self._remove_piece(to)
-        original_type = PAWN if move_promo(mv) else piece_type(placed)
-        self._put_piece(frm, piece_code(self.side, original_type))
-        if undo.captured:
-            cap_sq = to
-            if mv & FLAG_EP:
-                cap_sq = to - 8 if self.side == WHITE else to + 8
-            self._put_piece(cap_sq, undo.captured)
-        self.king_sq[0] = undo.king_w
-        self.king_sq[1] = undo.king_b
-        self.rep_key = undo.rep_key
-        self.key = undo.key
-
-    def make_null(self) -> tuple[int, int, int, int, int]:
-        state = (self.side, self.ep, self.halfmove, self.rep_key, self.key)
-        if self.ep >= 0:
-            self.rep_key ^= Z_EP[self.ep]
-            self.ep = -1
-        self.side = 1 - self.side
-        self.rep_key ^= Z_SIDE
-        self.halfmove += 1
-        self._refresh_key()
-        return state
-
-    def undo_null(self, state: tuple[int, int, int, int, int]) -> None:
-        self.side, self.ep, self.halfmove, self.rep_key, self.key = state
-
-    def preview_move(self, mv: int) -> tuple[int, list[int], int]:
-        frm, to = move_from(mv), move_to(mv)
-        moved = self.mailbox[frm]
-        if not moved:
-            return self.all_occ, self.bbs, 0
-        side = piece_side(moved)
-        ptype = piece_type(moved)
-        bbs = self.bbs.copy()
-        occ = self.all_occ
-        bbs[bb_index(side, ptype)] &= ~bit(frm)
-        occ &= ~bit(frm)
-        cap_sq = to
-        captured = self.mailbox[to]
-        if mv & FLAG_EP:
-            cap_sq = to - 8 if side == WHITE else to + 8
-            captured = self.mailbox[cap_sq]
-        if captured:
-            bbs[bb_index(piece_side(captured), piece_type(captured))] &= ~bit(cap_sq)
-            occ &= ~bit(cap_sq)
-        promo = move_promo(mv)
-        placed_type = (KNIGHT, BISHOP, ROOK, QUEEN)[promo - 1] if promo else ptype
-        placed = piece_code(side, placed_type)
-        bbs[bb_index(side, placed_type)] |= bit(to)
-        occ |= bit(to)
-        if mv & FLAG_CASTLE:
-            if to == 6:
-                rook_from, rook_to = 7, 5
-            elif to == 2:
-                rook_from, rook_to = 0, 3
-            elif to == 62:
-                rook_from, rook_to = 63, 61
-            else:
-                rook_from, rook_to = 56, 59
-            bbs[bb_index(side, ROOK)] &= ~bit(rook_from)
-            bbs[bb_index(side, ROOK)] |= bit(rook_to)
-            occ &= ~bit(rook_from)
-            occ |= bit(rook_to)
-        return occ, bbs, placed
-
-    def move_gives_check(self, mv: int) -> bool:
-        moved = self.mailbox[move_from(mv)]
-        if not moved:
-            return False
-        side = piece_side(moved)
-        occ, bbs, _ = self.preview_move(mv)
-        return bool(self.attackers_to(self.king_sq[1 - side], side, occ, bbs))
-
-    def is_repetition(self, count: int = 3) -> bool:
-        current = self.rep_key
-        start = max(0, len(self.rep_history) - self.halfmove - 1)
-        hits = 0
-        for key in self.rep_history[start:]:
-            if key == current:
-                hits += 1
-        return hits >= count
-
-    def is_draw(self) -> bool:
-        if self.halfmove >= 100 or self.is_repetition(3):
-            return True
-        if self.piece_bb(WHITE, PAWN) | self.piece_bb(BLACK, PAWN) | self.piece_bb(WHITE, ROOK) | self.piece_bb(BLACK, ROOK) | self.piece_bb(WHITE, QUEEN) | self.piece_bb(BLACK, QUEEN):
-            return False
-        minors = popcount(self.piece_bb(WHITE, KNIGHT) | self.piece_bb(BLACK, KNIGHT) | self.piece_bb(WHITE, BISHOP) | self.piece_bb(BLACK, BISHOP))
-        return minors <= 1
-
-    def material_non_pawn(self, side: int) -> int:
-        return sum(MATERIAL[p] * popcount(self.piece_bb(side, p)) for p in (KNIGHT, BISHOP, ROOK, QUEEN))
-
-    def see(self, mv: int) -> int:
-        if not is_capture_move(mv) and not move_promo(mv):
-            return 0
-        frm, to = move_from(mv), move_to(mv)
-        attacker = self.mailbox[frm]
-        if not attacker:
-            return -MATE_SCORE
-        side = piece_side(attacker)
-        cap_sq = to
-        captured = self.mailbox[to]
-        if mv & FLAG_EP:
-            cap_sq = to - 8 if side == WHITE else to + 8
-            captured = self.mailbox[cap_sq]
-        gain0 = SEE_VALUE[piece_type(captured)] if captured else 0
-        promo = move_promo(mv)
-        promoted_type = (KNIGHT, BISHOP, ROOK, QUEEN)[promo - 1] if promo else piece_type(attacker)
-        if promo:
-            gain0 += SEE_VALUE[promoted_type] - SEE_VALUE[PAWN]
-
-        bbs = self.bbs.copy()
-        occ = self.all_occ
-        aidx = bb_index(side, piece_type(attacker))
-        bbs[aidx] &= ~bit(frm)
-        occ &= ~bit(frm)
-        if captured:
-            cidx = bb_index(piece_side(captured), piece_type(captured))
-            bbs[cidx] &= ~bit(cap_sq)
-            occ &= ~bit(cap_sq)
-        pidx = bb_index(side, promoted_type)
-        bbs[pidx] |= bit(to)
-        occ |= bit(to)
-
-        gains = [gain0]
-        current_value = SEE_VALUE[promoted_type]
-        stm = 1 - side
-        depth = 0
-        while True:
-            attackers = self.attackers_to(to, stm, occ, bbs)
-            if not attackers:
-                break
-            found_sq = -1
-            found_type = -1
-            for ptype in (PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING):
-                subset = attackers & bbs[bb_index(stm, ptype)]
-                if subset:
-                    found_sq = lsb(subset)
-                    found_type = ptype
-                    break
-            if found_sq < 0:
-                break
-            depth += 1
-            gains.append(current_value - gains[-1])
-            if max(-gains[-2], gains[-1]) < 0:
-                break
-            bbs[bb_index(stm, found_type)] &= ~bit(found_sq)
-            occ &= ~bit(found_sq)
-            current_value = SEE_VALUE[found_type]
-            stm = 1 - stm
-            if depth > 30:
-                break
-        for i in range(len(gains) - 1, 0, -1):
-            gains[i - 1] = -max(-gains[i - 1], gains[i])
-        return gains[0]
-
-
-def _relative_rank(side: int, sq: int) -> int:
-    r = rank_of(sq)
-    return r if side == WHITE else 7 - r
-
-
-def _king_zone(sq: int) -> int:
-    zone = KING_ATTACKS[sq] | bit(sq)
-    f, r = file_of(sq), rank_of(sq)
-    for dr in (-2, 2):
-        nr = r + dr
-        if 0 <= nr < 8:
-            for df in (-1, 0, 1):
-                nf = f + df
-                if 0 <= nf < 8:
-                    zone |= bit(nr * 8 + nf)
-    return zone
-
-
-def _pawn_file_mask(file: int) -> int:
-    return FILE_A << file
-
-
-def _activity_map(board: Board, side: int) -> tuple[int, int, int, int]:
-    attacks = 0
-    mobility = 0
-    for ptype in range(6):
-        for sq in iter_bits(board.piece_bb(side, ptype)):
-            a = board.attacks_from(sq, piece_code(side, ptype))
-            attacks |= a
-            if ptype in (KNIGHT, BISHOP, ROOK, QUEEN):
-                mobility += popcount(a & ~board.occ[side])
-    enemy_king = board.king_sq[1 - side]
-    pressure = popcount(attacks & _king_zone(enemy_king)) * 11
-    space_mask = (RANK_4 | RANK_5 | RANK_6 | RANK_7) if side == WHITE else (RANK_2 | RANK_3 | RANK_4 | RANK_5)
-    space = popcount(attacks & space_mask & ~board.occ[side])
-    return attacks, pressure, mobility, space
-
-
-def _evaluate_side(
-    board: Board,
-    side: int,
-    own_attacks: int,
-    enemy_attacks: int,
-    pressure: int,
-    mobility: int,
-    space: int,
-) -> tuple[int, int]:
-    enemy = 1 - side
+def evaluate_material(board: chess.Board) -> int:
     score = 0
-    aggression = 0
-    pawns = board.piece_bb(side, PAWN)
-    enemy_pawns = board.piece_bb(enemy, PAWN)
-    enemy_king = board.king_sq[enemy]
-    own_king = board.king_sq[side]
-    enemy_zone = _king_zone(enemy_king)
-
-    for ptype in range(5):
-        bb = board.piece_bb(side, ptype)
-        score += MATERIAL[ptype] * popcount(bb)
-        for sq in iter_bits(bb):
-            f = file_of(sq)
-            rr = _relative_rank(side, sq)
-            center_dist = abs(f - 3.5) + abs(rank_of(sq) - 3.5)
-            if ptype == PAWN:
-                advance = rr
-                score += advance * 5
-                if f in (5, 6, 7):
-                    flank = 5 + max(0, rr - 3) * 9
-                    if file_of(enemy_king) >= 4:
-                        flank += max(0, rr - 3) * 8
-                        aggression += flank
-                    score += flank
-                if bit(sq) & CENTER4:
-                    score += 12
-                elif bit(sq) & EXT_CENTER:
-                    score += 5
-            elif ptype == KNIGHT:
-                score += int(26 - 6 * center_dist)
-                rr = _relative_rank(side, sq)
-                if rr >= 4:
-                    protected = bool(PAWN_ATTACKS[enemy][sq] & pawns)
-                    chased = bool(PAWN_ATTACKS[side][sq] & enemy_pawns)
-                    if protected and not chased:
-                        score += 28 + 8 * (rr - 4)
-                        aggression += 12
-            elif ptype == BISHOP:
-                score += int(18 - 3 * center_dist)
-            elif ptype == ROOK:
-                score += rr * 2
-            elif ptype == QUEEN:
-                score += int(8 - center_dist)
-
-    if popcount(board.piece_bb(side, BISHOP)) >= 2:
-        score += 28
-
-    for file in range(8):
-        own_on_file = pawns & _pawn_file_mask(file)
-        n = popcount(own_on_file)
-        if n > 1:
-            score -= 12 * (n - 1)
-        if n and not (pawns & ((_pawn_file_mask(file - 1) if file > 0 else 0) | (_pawn_file_mask(file + 1) if file < 7 else 0))):
-            score -= 8
-    for sq in iter_bits(pawns):
-        f, r = file_of(sq), rank_of(sq)
-        files = [f]
-        if f > 0: files.append(f - 1)
-        if f < 7: files.append(f + 1)
-        mask = 0
-        for ff in files:
-            if side == WHITE:
-                for rr in range(r + 1, 8): mask |= bit(rr * 8 + ff)
-            else:
-                for rr in range(0, r): mask |= bit(rr * 8 + ff)
-        if not (enemy_pawns & mask):
-            rr = _relative_rank(side, sq)
-            score += (0, 4, 8, 15, 28, 48, 85, 0)[rr]
-
-    enemy_file = file_of(enemy_king)
-    for ptype, base in ((ROOK, 18), (QUEEN, 10)):
-        for sq in iter_bits(board.piece_bb(side, ptype)):
-            f = file_of(sq)
-            own_file_pawns = pawns & _pawn_file_mask(f)
-            enemy_file_pawns = enemy_pawns & _pawn_file_mask(f)
-            if not own_file_pawns:
-                bonus = base + (12 if not enemy_file_pawns else 5)
-                if abs(f - enemy_file) <= 1:
-                    bonus += 18
-                    aggression += bonus
-                score += bonus
-
-    heavy = board.piece_bb(side, ROOK) | board.piece_bb(side, QUEEN)
-    heavy_squares = list(iter_bits(heavy))
-    for i, a in enumerate(heavy_squares):
-        for b in heavy_squares[i + 1:]:
-            if file_of(a) == file_of(b):
-                between = 0
-                lo, hi = sorted((rank_of(a), rank_of(b)))
-                for rr in range(lo + 1, hi): between |= bit(rr * 8 + file_of(a))
-                if not (between & board.all_occ):
-                    score += 20
-                    if abs(file_of(a) - enemy_file) <= 1:
-                        aggression += 18
-
-    score += pressure + mobility * 2 + space * 3
-    aggression += pressure + space * 2
-    safe_attackers = own_attacks & enemy_zone & ~enemy_attacks
-    score += popcount(safe_attackers) * 5
-
-    own_wing = 0 if file_of(own_king) <= 3 else 1
-    enemy_wing = 0 if enemy_file <= 3 else 1
-    opposite_wings = own_wing != enemy_wing
-    for sq in iter_bits(pawns):
-        f = file_of(sq)
-        rr = _relative_rank(side, sq)
-        if (enemy_wing == 1 and f >= 5) or (enemy_wing == 0 and f <= 2):
-            storm = max(0, rr - 2) * (8 if opposite_wings else 4)
-            score += storm
-            aggression += storm
-
-    shelter = 0
-    kf, kr = file_of(own_king), rank_of(own_king)
-    for df in (-1, 0, 1):
-        f = kf + df
-        if not 0 <= f < 8:
-            continue
-        for dr in (1, 2) if side == WHITE else (-1, -2):
-            r = kr + dr
-            if 0 <= r < 8 and board.mailbox[r * 8 + f] == piece_code(side, PAWN):
-                shelter += 7 if abs(dr) == 1 else 3
-    score += shelter
-    score -= popcount(enemy_attacks & _king_zone(own_king)) * 7
-
-    queens_present = bool(board.piece_bb(side, QUEEN) and board.piece_bb(enemy, QUEEN))
-    if queens_present and aggression > 20:
-        score += min(45, aggression // 5)
-    elif not queens_present and aggression > 35:
-        score -= min(32, aggression // 7)
-
-    return score, aggression
-
-
-def evaluate_white(board: Board) -> int:
-    wa_map = _activity_map(board, WHITE)
-    ba_map = _activity_map(board, BLACK)
-    white, wa = _evaluate_side(board, WHITE, wa_map[0], ba_map[0], wa_map[1], wa_map[2], wa_map[3])
-    black, ba = _evaluate_side(board, BLACK, ba_map[0], wa_map[0], ba_map[1], ba_map[2], ba_map[3])
-    score = white - black
-    material_gap = abs(
-        sum(MATERIAL[p] * popcount(board.piece_bb(WHITE, p)) for p in range(5))
-        - sum(MATERIAL[p] * popcount(board.piece_bb(BLACK, p)) for p in range(5))
-    )
-    if material_gap <= 120:
-        score += max(-28, min(28, (wa - ba) // 10))
-    total_nonpawn = board.material_non_pawn(WHITE) + board.material_non_pawn(BLACK)
-    if total_nonpawn <= 1200 and not (board.piece_bb(WHITE, QUEEN) | board.piece_bb(BLACK, QUEEN)):
-        score = score * 7 // 8
-    return score
-
-
-def evaluate(board: Board) -> int:
-    score = evaluate_white(board)
-    return score if board.side == WHITE else -score
-
-
-def sharpness(board: Board) -> int:
-    queens = 24 if board.piece_bb(WHITE, QUEEN) and board.piece_bb(BLACK, QUEEN) else 0
-    opposite = 18 if (file_of(board.king_sq[WHITE]) <= 3) != (file_of(board.king_sq[BLACK]) <= 3) else 0
-    advanced = 0
-    for side in (WHITE, BLACK):
-        for sq in iter_bits(board.piece_bb(side, PAWN)):
-            rr = _relative_rank(side, sq)
-            if rr >= 4:
-                advanced += 3 + 2 * (rr - 4)
-    center = popcount(board.all_occ & EXT_CENTER) * 2
-    imbalance = abs(board.material_non_pawn(WHITE) - board.material_non_pawn(BLACK)) // 80
-    exposed = 0
-    for side in (WHITE, BLACK):
-        kf, kr = file_of(board.king_sq[side]), rank_of(board.king_sq[side])
-        shelter = 0
-        for df in (-1, 0, 1):
-            f = kf + df
-            if 0 <= f < 8:
-                dr = 1 if side == WHITE else -1
-                r = kr + dr
-                if 0 <= r < 8 and board.mailbox[r * 8 + f] == piece_code(side, PAWN):
-                    shelter += 1
-        exposed += 3 - shelter
-    return min(128, queens + opposite + advanced + center + min(18, imbalance) + exposed * 5)
-
-
-@dataclass(slots=True)
-class TTEntry:
-    key: int
-    move: int
-    score: int
-    static_eval: int
-    depth: int
-    bound: int
-    age: int
-
-
-class TranspositionTable:
-    __slots__ = ("megabytes", "cluster_count", "clusters", "age")
-
-    def __init__(self, megabytes: int = 16) -> None:
-        self.megabytes = max(1, megabytes)
-        self.cluster_count = max(1024, self.megabytes * 4096)
-        self.clusters: dict[int, list[TTEntry]] = {}
-        self.age = 0
-
-    def resize(self, megabytes: int) -> None:
-        self.megabytes = max(1, min(4096, megabytes))
-        self.cluster_count = max(1024, self.megabytes * 4096)
-        self.clear()
-
-    def clear(self) -> None:
-        self.clusters.clear()
-        self.age = 0
-
-    def new_search(self) -> None:
-        self.age = (self.age + 1) & 31
-
-    def _index(self, key: int) -> int:
-        return ((key * self.cluster_count) >> 64) if self.cluster_count < (1 << 64) else key % self.cluster_count
-
-    def probe(self, key: int) -> TTEntry | None:
-        cluster = self.clusters.get(self._index(key))
-        if not cluster:
-            return None
-        for entry in cluster:
-            if entry.key == key:
-                return entry
-        return None
-
-    def store(self, key: int, move: int, score: int, static_eval: int, depth: int, bound: int, ply: int) -> None:
-        if score > MATE_BOUND:
-            score += ply
-        elif score < -MATE_BOUND:
-            score -= ply
-        idx = self._index(key)
-        cluster = self.clusters.setdefault(idx, [])
-        for i, old in enumerate(cluster):
-            if old.key == key:
-                if depth + 4 < old.depth and bound != BOUND_EXACT and old.age == self.age:
-                    return
-                if not move:
-                    move = old.move
-                cluster[i] = TTEntry(key, move, score, static_eval, depth, bound, self.age)
-                return
-        entry = TTEntry(key, move, score, static_eval, depth, bound, self.age)
-        if len(cluster) < 3:
-            cluster.append(entry)
-        else:
-            victim = min(range(3), key=lambda i: cluster[i].depth - 4 * ((self.age - cluster[i].age) & 31))
-            cluster[victim] = entry
-        if len(self.clusters) > self.cluster_count:
-            stale = [k for k, c in self.clusters.items() if all(((self.age - e.age) & 31) >= 8 for e in c)]
-            for k in stale[: max(1, len(stale) // 2)]:
-                self.clusters.pop(k, None)
-
-    def hashfull(self) -> int:
-        if not self.clusters:
-            return 0
-        sample = list(self.clusters.values())[:1000]
-        used = sum(sum(1 for e in c if e.age == self.age) for c in sample)
-        return min(1000, used * 1000 // max(1, len(sample) * 3))
-
-
-def tt_score(entry: TTEntry, ply: int) -> int:
-    score = entry.score
-    if score > MATE_BOUND:
-        score -= ply
-    elif score < -MATE_BOUND:
-        score += ply
-    return score
-
-
-class HistoryTables:
-    __slots__ = ("quiet", "capture", "cont1", "cont2", "counter", "killers")
-
-    QUIET_MAX = 8192
-    CAPTURE_MAX = 12800
-    CONT_MAX = 15320
-
-    def __init__(self) -> None:
-        self.quiet = array("h", [0]) * (2 * 2 * 2 * 64 * 64)
-        self.capture: dict[tuple[int, int, int, int], int] = {}
-        self.cont1: dict[tuple[int, int, int, int], int] = {}
-        self.cont2: dict[tuple[int, int, int, int], int] = {}
-        self.counter = array("I", [0]) * (12 * 64)
-        self.killers = [[0, 0] for _ in range(MAX_PLY)]
-
-    @staticmethod
-    def _gravity(value: int, bonus: int, maximum: int) -> int:
-        bonus = max(-maximum, min(maximum, bonus))
-        value += bonus - abs(bonus) * value // maximum
-        return max(-32768, min(32767, value))
-
-    @staticmethod
-    def _qidx(side: int, ft: int, tt: int, frm: int, to: int) -> int:
-        return (((side * 2 + ft) * 2 + tt) * 64 + frm) * 64 + to
-
-    def quiet_get(self, side: int, ft: int, tt: int, frm: int, to: int) -> int:
-        return int(self.quiet[self._qidx(side, ft, tt, frm, to)])
-
-    def quiet_update(self, side: int, ft: int, tt: int, frm: int, to: int, bonus: int) -> None:
-        i = self._qidx(side, ft, tt, frm, to)
-        self.quiet[i] = self._gravity(int(self.quiet[i]), bonus, self.QUIET_MAX)
-
-    def capture_get(self, piece: int, to: int, captured_type: int, tt: int) -> int:
-        return self.capture.get((piece, to, captured_type, tt), 0)
-
-    def capture_update(self, piece: int, to: int, captured_type: int, tt: int, bonus: int) -> None:
-        key = (piece, to, captured_type, tt)
-        self.capture[key] = self._gravity(self.capture.get(key, 0), bonus, self.CAPTURE_MAX)
-
-    def continuation_get(self, previous: tuple[int, int] | None, piece: int, to: int, distance: int) -> int:
-        if previous is None:
-            return 0
-        key = (previous[0], previous[1], piece, to)
-        return (self.cont1 if distance == 1 else self.cont2).get(key, 0)
-
-    def continuation_update(self, previous: tuple[int, int] | None, piece: int, to: int, distance: int, bonus: int) -> None:
-        if previous is None:
-            return
-        table = self.cont1 if distance == 1 else self.cont2
-        key = (previous[0], previous[1], piece, to)
-        table[key] = self._gravity(table.get(key, 0), bonus, self.CONT_MAX)
-
-    def clear(self) -> None:
-        self.__init__()
-
-
-class SearchStop(Exception):
-    pass
-
-
-@dataclass(slots=True)
-class SearchLimits:
-    depth: int = 64
-    nodes: int = 0
-    movetime_ms: int = 0
-    wtime: int = 0
-    btime: int = 0
-    winc: int = 0
-    binc: int = 0
-    movestogo: int = 0
-    infinite: bool = False
-
-
-@dataclass(slots=True)
-class SearchResult:
-    best_move: int = 0
-    score: int = 0
-    depth: int = 0
-    seldepth: int = 0
-    nodes: int = 0
-    elapsed_ms: int = 0
-    pv: tuple[int, ...] = ()
-
-
-class Searcher:
-    def __init__(self, tt: TranspositionTable | None = None, histories: HistoryTables | None = None) -> None:
-        self.tt = tt or TranspositionTable()
-        self.hist = histories or HistoryTables()
-        self.stop_event = threading.Event()
-        self.nodes = 0
-        self.seldepth = 0
-        self.start_ns = 0
-        self.soft_deadline_ns = 0
-        self.hard_deadline_ns = 0
-        self.node_limit = 0
-        self.root_side = WHITE
-        self.pv_table: list[list[int]] = [[] for _ in range(MAX_PLY + 2)]
-        self.moves_stack: list[tuple[int, int] | None] = [None] * (MAX_PLY + 2)
-        self.root_best = 0
-        self.last_score = 0
-        self.tactical_cache: dict[tuple[int, int], tuple[bool, bool]] = {}
-
-    def stop(self) -> None:
-        self.stop_event.set()
-
-    def _check_stop(self) -> None:
-        if self.stop_event.is_set():
-            raise SearchStop
-        if self.node_limit and self.nodes >= self.node_limit:
-            raise SearchStop
-        if self.hard_deadline_ns and time.monotonic_ns() >= self.hard_deadline_ns:
-            raise SearchStop
-
-    def _time_budget(self, board: Board, limits: SearchLimits) -> tuple[int, int]:
-        now = time.monotonic_ns()
-        if limits.infinite or (not limits.movetime_ms and not limits.wtime and not limits.btime):
-            return 0, 0
-        if limits.movetime_ms:
-            hard_ms = max(1, limits.movetime_ms)
-            soft_ms = max(1, int(hard_ms * 0.92))
-            return now + soft_ms * 1_000_000, now + hard_ms * 1_000_000
-        remaining = limits.wtime if board.side == WHITE else limits.btime
-        inc = limits.winc if board.side == WHITE else limits.binc
-        mtg = limits.movestogo or 24
-        overhead = 8
-        usable = max(1, remaining - overhead)
-        base = usable / max(8, mtg) + inc * 0.72
-        volatility = sharpness(board) / 128.0
-        soft_ms = min(usable * 0.20, base * (1.0 + 0.55 * volatility))
-        hard_ms = min(usable * 0.45, max(soft_ms * 2.2, soft_ms + 8))
-        return now + int(max(1, soft_ms)) * 1_000_000, now + int(max(1, hard_ms)) * 1_000_000
-
-    def _draw_score(self, board: Board) -> int:
-        return -CONTEMPT if board.side == self.root_side else CONTEMPT
-
-    def _is_advanced_pawn_push(self, board: Board, mv: int) -> bool:
-        piece = board.mailbox[move_from(mv)]
-        if not piece or piece_type(piece) != PAWN or is_capture_move(mv):
-            return False
-        rr = _relative_rank(board.side, move_to(mv))
-        return rr >= 5
-
-    def _tactical_flags(self, board: Board, mv: int) -> tuple[bool, bool]:
-        cache_key = (board.key, mv)
-        cached = self.tactical_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        moved = board.mailbox[move_from(mv)]
-        if not moved:
-            return False, False
-        side = piece_side(moved)
-        occ, bbs, placed = board.preview_move(mv)
-        enemy_king = board.king_sq[1 - side]
-        gives = bool(board.attackers_to(enemy_king, side, occ, bbs))
-        attacks = board.attacks_from(move_to(mv), placed, occ) if placed else 0
-        threat = gives or popcount(attacks & _king_zone(enemy_king)) >= 2
-        if len(self.tactical_cache) > 20_000:
-            self.tactical_cache.clear()
-        self.tactical_cache[cache_key] = (gives, threat)
-        return gives, threat
-
-    def _move_history(self, board: Board, mv: int, ply: int, threats: tuple[int, int]) -> int:
-        frm, to = move_from(mv), move_to(mv)
-        piece = board.mailbox[frm]
-        if not piece:
-            return -100_000
-        side = board.side
-        from_t = int(bool(threats[1 - side] & bit(frm)))
-        to_t = int(bool(threats[1 - side] & bit(to)))
-        if is_capture_move(mv):
-            captured = board.mailbox[to]
-            if mv & FLAG_EP:
-                captured = piece_code(1 - side, PAWN)
-            ctype = piece_type(captured) if captured else PAWN
-            return self.hist.capture_get(piece, to, ctype, to_t)
-        prev1 = self.moves_stack[ply - 1] if ply >= 1 else None
-        prev2 = self.moves_stack[ply - 2] if ply >= 2 else None
-        return (
-            self.hist.quiet_get(side, from_t, to_t, frm, to)
-            + self.hist.continuation_get(prev1, piece, to, 1)
-            + self.hist.continuation_get(prev2, piece, to, 2)
+    for piece_type, value in PIECE_VALUE.items():
+        score += value * (
+            len(board.pieces(piece_type, chess.WHITE))
+            - len(board.pieces(piece_type, chess.BLACK))
         )
+    return score
 
-    def _ordered_moves(self, board: Board, ply: int, tt_move: int, captures_only: bool = False, include_checks: bool = False) -> list[int]:
-        moves = board.generate_legal(captures_only, include_checks)
-        if not moves:
-            return moves
-        attacks = (board.all_attacks(WHITE), board.all_attacks(BLACK))
-        good_caps: list[tuple[int, int]] = []
-        bad_caps: list[tuple[int, int]] = []
-        quiets: list[tuple[int, int]] = []
-        tt_first: list[int] = []
-        killer1 = self.hist.killers[ply][0] if ply < MAX_PLY else 0
-        killer2 = self.hist.killers[ply][1] if ply < MAX_PLY else 0
-        prev = self.moves_stack[ply - 1] if ply >= 1 else None
-        counter = 0
-        if prev is not None:
-            idx = (abs(prev[0]) - 1) * 2 + piece_side(prev[0])
-            counter = int(self.hist.counter[idx * 64 + prev[1]])
-        for mv in moves:
-            if mv == tt_move:
-                tt_first.append(mv)
-                continue
-            if is_capture_move(mv) or move_promo(mv):
-                frm, to = move_from(mv), move_to(mv)
-                attacker = board.mailbox[frm]
-                captured = board.mailbox[to]
-                if mv & FLAG_EP:
-                    captured = piece_code(1 - board.side, PAWN)
-                victim_value = SEE_VALUE[piece_type(captured)] if captured else 0
-                hist = self._move_history(board, mv, ply, attacks)
-                score = victim_value * 14 - SEE_VALUE[piece_type(attacker)] + hist + (4000 if move_promo(mv) == 4 else 0)
-                see = board.see(mv)
-                (good_caps if see >= 0 else bad_caps).append((score + see, mv))
-            else:
-                hist = self._move_history(board, mv, ply, attacks)
-                score = hist
-                if mv == killer1: score += 90_000
-                elif mv == killer2: score += 80_000
-                if mv == counter: score += 70_000
-                gives, threat = self._tactical_flags(board, mv)
-                if gives: score += 24_000
-                if self._is_advanced_pawn_push(board, mv): score += 12_000
-                if threat: score += 9_000
-                quiets.append((score, mv))
-        good_caps.sort(key=lambda x: x[0], reverse=True)
-        quiets.sort(key=lambda x: x[0], reverse=True)
-        bad_caps.sort(key=lambda x: x[0], reverse=True)
-        if captures_only:
-            return tt_first + [m for _, m in good_caps] + [m for _, m in bad_caps]
-        return tt_first + [m for _, m in good_caps] + [m for _, m in quiets] + [m for _, m in bad_caps]
 
-    def _update_histories(self, board: Board, best: int, searched: list[int], depth: int, ply: int) -> None:
-        if not best:
-            return
-        attacks = (board.all_attacks(WHITE), board.all_attacks(BLACK))
-        side = board.side
-        best_quiet = not is_capture_move(best) and not move_promo(best)
-        bonus = min(1691, 190 * depth - 81)
-        malus = min(1400, 120 * depth + 40)
-        if best_quiet:
-            frm, to = move_from(best), move_to(best)
-            piece = board.mailbox[frm]
-            ft = int(bool(attacks[1 - side] & bit(frm)))
-            tt = int(bool(attacks[1 - side] & bit(to)))
-            self.hist.quiet_update(side, ft, tt, frm, to, bonus)
-            prev1 = self.moves_stack[ply - 1] if ply >= 1 else None
-            prev2 = self.moves_stack[ply - 2] if ply >= 2 else None
-            self.hist.continuation_update(prev1, piece, to, 1, min(1206, 96 * depth - 73))
-            self.hist.continuation_update(prev2, piece, to, 2, min(900, 72 * depth))
-            if ply < MAX_PLY:
-                if self.hist.killers[ply][0] != best:
-                    self.hist.killers[ply][1] = self.hist.killers[ply][0]
-                    self.hist.killers[ply][0] = best
-            if prev1 is not None:
-                idx = (abs(prev1[0]) - 1) * 2 + piece_side(prev1[0])
-                self.hist.counter[idx * 64 + prev1[1]] = best
-        for mv in searched:
-            if mv == best:
-                continue
-            frm, to = move_from(mv), move_to(mv)
-            piece = board.mailbox[frm]
-            if not piece:
-                continue
-            if not is_capture_move(mv) and not move_promo(mv):
-                ft = int(bool(attacks[1 - side] & bit(frm)))
-                tt = int(bool(attacks[1 - side] & bit(to)))
-                self.hist.quiet_update(side, ft, tt, frm, to, -malus)
-            else:
-                captured = board.mailbox[to]
-                if mv & FLAG_EP:
-                    captured = piece_code(1 - side, PAWN)
-                ctype = piece_type(captured) if captured else PAWN
-                tt = int(bool(attacks[1 - side] & bit(to)))
-                self.hist.capture_update(piece, to, ctype, tt, -malus)
+def _terminal_score(board: chess.Board, ply_from_root: int) -> float | None:
+    outcome = board.outcome(claim_draw=False)
+    if outcome is not None:
+        if outcome.winner is None:
+            return 0.0
+        if outcome.winner == chess.WHITE:
+            return float(MATE_SCORE - ply_from_root)
+        return float(-MATE_SCORE + ply_from_root)
 
-    def qsearch(self, board: Board, alpha: int, beta: int, ply: int, qdepth: int = 0) -> int:
-        self._check_stop()
-        self.nodes += 1
-        self.seldepth = max(self.seldepth, ply)
-        if ply >= MAX_PLY - 1:
-            return evaluate(board)
-        if board.is_draw():
-            return self._draw_score(board)
-        in_check = board.in_check()
-        stand = -INF if in_check else evaluate(board)
-        if not in_check:
-            if stand >= beta:
-                return stand
-            if stand > alpha:
-                alpha = stand
-        entry = self.tt.probe(board.key)
-        tt_move = entry.move if entry else 0
-        moves = self._ordered_moves(board, ply, tt_move, captures_only=not in_check, include_checks=(not in_check and qdepth < 2))
-        if in_check and not moves:
-            return -MATE_SCORE + ply
-        for mv in moves:
-            if not in_check and is_capture_move(mv):
-                captured = board.mailbox[move_to(mv)]
-                gain = MATERIAL[piece_type(captured)] if captured else 100
-                gives_check, _ = self._tactical_flags(board, mv)
-                if stand + gain + 110 < alpha and not move_promo(mv) and not gives_check:
-                    continue
-                if board.see(mv) < -90 and not gives_check:
-                    continue
-            moved_piece = board.mailbox[move_from(mv)]
-            board.make_move(mv)
-            self.moves_stack[ply] = (moved_piece, move_to(mv))
+    if board.can_claim_draw():
+        return 0.0
+    return None
+
+
+def _move_order_score(board: chess.Board, move: chess.Move) -> int:
+    score = 0
+
+    if move.promotion is not None:
+        score += 20_000 + 100 * PIECE_VALUE[move.promotion]
+
+    if board.is_capture(move):
+        attacker = board.piece_at(move.from_square)
+        attacker_value = PIECE_VALUE[attacker.piece_type] if attacker is not None else 0
+
+        if board.is_en_passant(move):
+            victim_value = PIECE_VALUE[chess.PAWN]
+        else:
+            victim = board.piece_at(move.to_square)
+            victim_value = PIECE_VALUE[victim.piece_type] if victim is not None else 0
+
+        score += 10_000 + 100 * victim_value - attacker_value
+
+    return score
+
+
+def _ordered_moves(board: chess.Board) -> list[chess.Move]:
+    moves = list(board.legal_moves)
+    moves.sort(key=lambda move: _move_order_score(board, move), reverse=True)
+    return moves
+
+
+def _check_deadline(deadline_ns: int | None) -> None:
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        raise SearchTimeout
+
+
+def minimax(
+    board: chess.Board,
+    depth_remaining: int,
+    alpha: float,
+    beta: float,
+    ply_from_root: int,
+    *,
+    deadline_ns: int | None = None,
+    stats: SearchStats | None = None,
+) -> float:
+    _check_deadline(deadline_ns)
+    if stats is not None:
+        stats.nodes += 1
+
+    terminal = _terminal_score(board, ply_from_root)
+    if terminal is not None:
+        return terminal
+    if depth_remaining == 0:
+        return float(evaluate_material(board))
+
+    moves = _ordered_moves(board)
+
+    if board.turn == chess.WHITE:
+        best = -math.inf
+        for move in moves:
+            board.push(move)
             try:
-                score = -self.qsearch(board, -beta, -alpha, ply + 1, qdepth + 1)
+                score = minimax(
+                    board,
+                    depth_remaining - 1,
+                    alpha,
+                    beta,
+                    ply_from_root + 1,
+                    deadline_ns=deadline_ns,
+                    stats=stats,
+                )
             finally:
-                board.undo_move()
-            if score >= beta:
-                return score
-            if score > alpha:
-                alpha = score
-        return alpha
-
-    def search(self, board: Board, depth: int, alpha: int, beta: int, ply: int, pv: bool, cut_node: bool = False, excluded: int = 0) -> int:
-        self._check_stop()
-        self.nodes += 1
-        self.seldepth = max(self.seldepth, ply)
-        if ply >= MAX_PLY - 1:
-            return evaluate(board)
-        if board.is_draw():
-            return self._draw_score(board)
-        if depth <= 0:
-            return self.qsearch(board, alpha, beta, ply)
-
-        in_check = board.in_check()
-        orig_alpha = alpha
-        key = board.key ^ (excluded * 0x9E3779B97F4A7C15 & ALL64) if excluded else board.key
-        entry = self.tt.probe(key)
-        tt_move = entry.move if entry and entry.move != excluded else 0
-        tscore = tt_score(entry, ply) if entry else 0
-        if entry and not pv and entry.depth >= depth:
-            if entry.bound == BOUND_EXACT:
-                return tscore
-            if entry.bound == BOUND_LOWER and tscore >= beta:
-                return tscore
-            if entry.bound == BOUND_UPPER and tscore <= alpha:
-                return tscore
-
-        static_eval = entry.static_eval if entry else evaluate(board)
-        volatility = sharpness(board)
-
-        if not pv and not in_check and depth <= 3 and not excluded:
-            razor_margin = 230 + 220 * depth * depth + volatility
-            if static_eval + razor_margin <= alpha:
-                q = self.qsearch(board, alpha, beta, ply)
-                if q <= alpha:
-                    return q
-
-        if not pv and not in_check and depth <= 7 and not excluded and abs(beta) < MATE_BOUND:
-            margin = 70 + 72 * depth + 20 * depth * depth + volatility * 2
-            if static_eval - margin >= beta:
-                return beta + (static_eval - beta) * 7 // 10
-
-        if not pv and not in_check and depth >= 3 and not excluded and board.material_non_pawn(board.side) > 480:
-            nmp_margin = 90 + volatility * 2
-            if static_eval >= beta + nmp_margin:
-                gap = min(900, max(0, static_eval - beta))
-                reduction = 2 + depth // 4 + gap // 320
-                if volatility >= 70:
-                    reduction = max(2, reduction - 1)
-                state = board.make_null()
-                try:
-                    score = -self.search(board, depth - reduction - 1, -beta, -beta + 1, ply + 1, False, True)
-                finally:
-                    board.undo_null(state)
-                if score >= beta:
-                    if depth >= 8:
-                        verify = self.search(board, depth - reduction, beta - 1, beta, ply, False, True, excluded)
-                        if verify >= beta:
-                            return score
-                    else:
-                        return score
-
-        singular_extend = 0
-        if not excluded and tt_move and entry and depth >= 6 and entry.depth >= depth - 3 and entry.bound in (BOUND_EXACT, BOUND_LOWER) and abs(tscore) < MATE_BOUND:
-            singular_beta = tscore - max(1, depth // 4)
-            verify_depth = max(1, (depth - 1) // 2)
-            singular_score = self.search(board, verify_depth, singular_beta - 1, singular_beta, ply, False, cut_node, tt_move)
-            if singular_score < singular_beta:
-                singular_extend = 1
-                if self._tactical_flags(board, tt_move)[0] and singular_score < singular_beta - 45:
-                    singular_extend = 2
-
-        moves = self._ordered_moves(board, ply, tt_move)
-        if excluded:
-            moves = [m for m in moves if m != excluded]
-        if not moves:
-            return -MATE_SCORE + ply if in_check else self._draw_score(board)
-
-        best = -INF
-        best_move = 0
-        searched: list[int] = []
-        legal_count = 0
-        attacks = (board.all_attacks(WHITE), board.all_attacks(BLACK))
-        for index, mv in enumerate(moves, 1):
-            self._check_stop()
-            if mv == excluded:
-                continue
-            quiet = not is_capture_move(mv) and not move_promo(mv)
-            hist_score = self._move_history(board, mv, ply, attacks)
-            gives_check, direct_threat = self._tactical_flags(board, mv)
-            advanced = self._is_advanced_pawn_push(board, mv)
-
-            if not pv and not in_check and quiet and depth <= 6 and legal_count > 0 and not direct_threat and not advanced:
-                lmp = 2 + depth * depth // 2 + max(0, volatility - 64) // 16
-                if index > lmp and hist_score < 0:
-                    continue
-                fut_margin = 65 * depth + max(-80, min(100, hist_score // 80)) + volatility
-                if depth <= 4 and static_eval + fut_margin <= alpha:
-                    continue
-                if depth <= 3 and hist_score < -900 * depth:
-                    continue
-
-            extension = singular_extend if mv == tt_move else 0
-            new_depth = depth - 1 + extension
-            reduction = 0
-            if legal_count >= 2 and depth >= 3 and quiet and not in_check:
-                reduction = max(0, int(math.log(depth + 1) * math.log(index + 1) / 1.85) - 1)
-                reduction += 1 if cut_node and not pv else 0
-                reduction -= 1 if hist_score > 2500 else 0
-                reduction -= 2 if hist_score > 6000 else 0
-                reduction -= 2 if gives_check else 0
-                reduction -= 1 if advanced else 0
-                reduction -= 1 if direct_threat else 0
-                reduction -= 1 if volatility >= 70 else 0
-                reduction = max(0, min(reduction, max(0, new_depth - 1)))
-                if gives_check or advanced or direct_threat or hist_score >= 6000:
-                    reduction = 0
-
-            moved_piece = board.mailbox[move_from(mv)]
-            board.make_move(mv)
-            self.moves_stack[ply] = (moved_piece, move_to(mv))
-            legal_count += 1
-            searched.append(mv)
-
-            try:
-                if legal_count == 1:
-                    score = -self.search(board, new_depth, -beta, -alpha, ply + 1, pv, False)
-                else:
-                    rd = max(0, new_depth - reduction)
-                    score = -self.search(board, rd, -alpha - 1, -alpha, ply + 1, False, True)
-                    if score > alpha and reduction:
-                        score = -self.search(board, new_depth, -alpha - 1, -alpha, ply + 1, False, True)
-                    if score > alpha and score < beta:
-                        score = -self.search(board, new_depth, -beta, -alpha, ply + 1, pv, False)
-                child_pv = self.pv_table[ply + 1].copy()
-            finally:
-                board.undo_move()
+                board.pop()
 
             if score > best:
                 best = score
-                best_move = mv
-                if score > alpha:
-                    alpha = score
-                    if pv:
-                        self.pv_table[ply] = [mv] + child_pv
+            if best > alpha:
+                alpha = best
             if alpha >= beta:
-                self._update_histories(board, mv, searched, depth, ply)
-                self.tt.store(key, mv, score, static_eval, depth, BOUND_LOWER, ply)
-                return score
-
-        bound = BOUND_EXACT if best > orig_alpha else BOUND_UPPER
-        self.tt.store(key, best_move, best, static_eval, depth, bound, ply)
+                if stats is not None:
+                    stats.cutoffs += 1
+                break
         return best
 
-    def search_root(self, board: Board, depth: int, alpha: int, beta: int) -> tuple[int, int, list[int]]:
-        entry = self.tt.probe(board.key)
-        tt_move = entry.move if entry else self.root_best
-        moves = self._ordered_moves(board, 0, tt_move)
-        if not moves:
-            return 0, (-MATE_SCORE if board.in_check() else self._draw_score(board)), []
-        best_move = moves[0]
-        best_score = -INF
-        best_pv: list[int] = []
-        orig_alpha = alpha
-        searched: list[int] = []
-        for i, mv in enumerate(moves):
-            self._check_stop()
-            moved_piece = board.mailbox[move_from(mv)]
-            board.make_move(mv)
-            self.moves_stack[0] = (moved_piece, move_to(mv))
-            self.pv_table[1] = []
+    best = math.inf
+    for move in moves:
+        board.push(move)
+        try:
+            score = minimax(
+                board,
+                depth_remaining - 1,
+                alpha,
+                beta,
+                ply_from_root + 1,
+                deadline_ns=deadline_ns,
+                stats=stats,
+            )
+        finally:
+            board.pop()
+
+        if score < best:
+            best = score
+        if best < beta:
+            beta = best
+        if alpha >= beta:
+            if stats is not None:
+                stats.cutoffs += 1
+            break
+    return best
+
+
+def _search_root(
+    board: chess.Board,
+    depth: int,
+    *,
+    deadline_ns: int | None,
+    stats: SearchStats | None = None,
+) -> tuple[chess.Move | None, float]:
+    _check_deadline(deadline_ns)
+    terminal = _terminal_score(board, 0)
+    if terminal is not None:
+        return None, terminal
+
+    moves = _ordered_moves(board)
+    if not moves:
+        return None, 0.0
+
+    alpha = -math.inf
+    beta = math.inf
+    best_move = moves[0]
+
+    if board.turn == chess.WHITE:
+        best_score = -math.inf
+        for move in moves:
+            _check_deadline(deadline_ns)
+            board.push(move)
             try:
-                if i == 0:
-                    score = -self.search(board, depth - 1, -beta, -alpha, 1, True, False)
-                else:
-                    score = -self.search(board, depth - 1, -alpha - 1, -alpha, 1, False, True)
-                    if score > alpha:
-                        score = -self.search(board, depth - 1, -beta, -alpha, 1, True, False)
-                child = self.pv_table[1].copy()
+                score = minimax(
+                    board,
+                    depth - 1,
+                    alpha,
+                    beta,
+                    1,
+                    deadline_ns=deadline_ns,
+                    stats=stats,
+                )
             finally:
-                board.undo_move()
-            searched.append(mv)
+                board.pop()
+
             if score > best_score:
                 best_score = score
-                best_move = mv
-                best_pv = [mv] + child
-            if score > alpha:
-                alpha = score
-            if alpha >= beta:
-                self._update_histories(board, mv, searched, depth, 0)
-                break
-        bound = BOUND_EXACT if best_score > orig_alpha and best_score < beta else (BOUND_LOWER if best_score >= beta else BOUND_UPPER)
-        self.tt.store(board.key, best_move, best_score, evaluate(board), depth, bound, 0)
-        return best_move, best_score, best_pv
+                best_move = move
+            if best_score > alpha:
+                alpha = best_score
+        return best_move, best_score
 
-    def think(self, board: Board, limits: SearchLimits, info_callback=None) -> SearchResult:
-        self.stop_event.clear()
-        self.nodes = 0
-        self.seldepth = 0
-        self.start_ns = time.monotonic_ns()
-        self.root_side = board.side
-        self.node_limit = limits.nodes
-        self.soft_deadline_ns, self.hard_deadline_ns = self._time_budget(board, limits)
-        self.tt.new_search()
-        self.pv_table = [[] for _ in range(MAX_PLY + 2)]
-        self.moves_stack = [None] * (MAX_PLY + 2)
-        self.tactical_cache.clear()
+    best_score = math.inf
+    for move in moves:
+        _check_deadline(deadline_ns)
+        board.push(move)
+        try:
+            score = minimax(
+                board,
+                depth - 1,
+                alpha,
+                beta,
+                1,
+                deadline_ns=deadline_ns,
+                stats=stats,
+            )
+        finally:
+            board.pop()
 
-        legal = board.generate_legal()
-        if not legal:
-            score = -MATE_SCORE if board.in_check() else self._draw_score(board)
-            return SearchResult(0, score, 0, 0, 0, 0, ())
-        self.root_best = legal[0]
-        result = SearchResult(best_move=self.root_best)
-        average = 0
-        max_depth = max(1, min(MAX_PLY - 2, limits.depth))
-        for depth in range(1, max_depth + 1):
-            delta = max(16, 23 + average * average // 26394)
-            alpha = max(-INF, average - delta)
-            beta = min(INF, average + delta)
-            if depth <= 2:
-                alpha, beta = -INF, INF
-            completed = False
-            try:
-                while True:
-                    move, score, pv = self.search_root(board, depth, alpha, beta)
-                    if score <= alpha:
-                        alpha = max(-INF, score - delta)
-                        delta += max(4, 26 * delta // 128)
-                        continue
-                    if score >= beta:
-                        beta = min(INF, score + delta)
-                        delta += max(6, 60 * delta // 128)
-                        continue
-                    completed = True
-                    break
-            except SearchStop:
-                break
-            if not completed:
-                break
-            average = (average * 2 + score) // 3 if depth > 1 else score
-            self.root_best = move
-            elapsed = max(1, (time.monotonic_ns() - self.start_ns) // 1_000_000)
-            result = SearchResult(move, score, depth, self.seldepth, self.nodes, elapsed, tuple(pv))
-            if info_callback is not None:
-                info_callback(result, self.tt.hashfull())
-            if abs(score) >= MATE_BOUND:
-                break
-            if self.soft_deadline_ns and time.monotonic_ns() >= self.soft_deadline_ns:
-                break
-        if result.depth == 0:
-            elapsed = max(0, (time.monotonic_ns() - self.start_ns) // 1_000_000)
-            result = SearchResult(self.root_best, 0, 0, self.seldepth, self.nodes, elapsed, (self.root_best,))
-        self.last_score = result.score
-        return result
+        if score < best_score:
+            best_score = score
+            best_move = move
+        if best_score < beta:
+            beta = best_score
+    return best_move, best_score
 
 
-class AlphaknightEngine:
-    def __init__(self) -> None:
-        self.board = Board()
-        self.tt = TranspositionTable(16)
-        self.hist = HistoryTables()
-        self.searcher = Searcher(self.tt, self.hist)
-        self.move_overhead = 8
+def _deadline_from_clock(time_left_ms: int) -> int:
+    now = time.monotonic_ns()
+    usable_ms = max(0, time_left_ms - CLOCK_RESERVE_MS)
+    budget_ms = min(MAX_THINK_TIME_MS, int(usable_ms * CLOCK_FRACTION))
+    return now + budget_ms * 1_000_000
 
-    def new_game(self) -> None:
-        self.board.set_fen(START_FEN)
-        self.tt.clear()
-        self.hist.clear()
+
+def get_move(fen: str, time_left_ms: int) -> str:
+    board = chess.Board(fen)
+
+    if _terminal_score(board, 0) is not None:
+        return NO_MOVE
+
+    moves = _ordered_moves(board)
+    if not moves:
+        return NO_MOVE
+
+    best_move = moves[0]
+    deadline_ns = _deadline_from_clock(time_left_ms)
+
+    for depth in range(1, MAX_SEARCH_DEPTH + 1):
+        try:
+            candidate, _ = _search_root(board, depth, deadline_ns=deadline_ns)
+        except SearchTimeout:
+            break
+        if candidate is not None:
+            best_move = candidate
+
+    return best_move.uci()
   </script>
 </body>
 </html>
