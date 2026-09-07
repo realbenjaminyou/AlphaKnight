@@ -45,7 +45,6 @@
       padding: 20px;
     }
 
-    /* Cinematic Immersive Background with High-End Chess Imagery */
     body::before {
       content: "";
       position: fixed;
@@ -86,7 +85,6 @@
       letter-spacing: 0.3px;
     }
 
-    /* Glassmorphism Model Selector Bar */
     .model-selector-bar {
       width: 100%;
       max-width: 1200px;
@@ -349,6 +347,35 @@
     }
     .stats-grid span { color: var(--text-main); font-weight: 600; font-family: monospace; }
 
+    .history-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .history-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-action {
+      font-size: 0.76rem !important;
+      padding: 4px 9px !important;
+      border-radius: 6px !important;
+      font-weight: 600;
+      background: rgba(88, 166, 255, 0.12);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      color: var(--accent);
+      box-shadow: none !important;
+    }
+
+    .btn-action:hover:not(:disabled) {
+      background: rgba(88, 166, 255, 0.25);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
     .history-box {
       height: 200px;
       background: rgba(15, 17, 22, 0.6);
@@ -361,6 +388,11 @@
       flex-direction: column;
       gap: 4px;
       border: 1px solid rgba(255, 255, 255, 0.04);
+      user-select: text !important;
+    }
+
+    .history-box * {
+      user-select: text !important;
     }
 
     .history-row {
@@ -368,6 +400,7 @@
       color: var(--text-dim);
       padding: 2px 4px;
       border-radius: 4px;
+      user-select: text !important;
     }
     .history-row:hover {
       background: rgba(255, 255, 255, 0.03);
@@ -470,7 +503,6 @@
     <div id="runtime-status" class="status-badge status-loading">Loading Pyodide &amp; python-chess...</div>
   </header>
 
-  <!-- Interactive Model Selection Menu -->
   <div class="model-selector-bar">
     <div class="selector-label-group">
       <div class="selector-title">
@@ -520,7 +552,14 @@
       </div>
 
       <div class="card">
-        <strong style="font-size: 0.95rem; margin-bottom: 8px; display: block;">Game Notation</strong>
+        <div class="history-header">
+          <strong style="font-size: 0.95rem;">Game Notation</strong>
+          <div class="history-actions">
+            <button id="btn-copy-moves" class="btn-action" onclick="copyMoveText()" title="Copy all moves as a space-separated string">Copy Moves</button>
+            <button id="btn-copy-pgn" class="btn-action" onclick="copyPGN()" title="Copy standard PGN">Copy PGN</button>
+            <button id="btn-export-pgn" class="btn-action" onclick="exportPGN()" title="Download .pgn file">Export PGN</button>
+          </div>
+        </div>
         <div class="history-box" id="move-history"></div>
       </div>
 
@@ -594,6 +633,7 @@
     let moveList = [];
     let pendingPromotion = null;
     let currentEngineKey = "Centurion";
+    let gameResult = "*";
 
     const boardEl = document.getElementById("board");
     const statusEl = document.getElementById("runtime-status");
@@ -606,7 +646,6 @@
         const micropip = pyodide.pyimport("micropip");
         await micropip.install("chess");
 
-        // Load Python Bridge
         await pyodide.runPythonAsync(`
 import json
 import time
@@ -632,7 +671,11 @@ def js_get_board_state():
         "side": "w" if current_board.turn == chess.WHITE else "b",
         "fen": current_board.fen(),
         "legal": legal,
-        "is_draw": current_board.is_checkmate() == False and current_board.is_game_over(),
+        "is_checkmate": current_board.is_checkmate(),
+        "is_stalemate": current_board.is_stalemate(),
+        "is_insufficient": current_board.is_insufficient_material(),
+        "is_fifty_moves": current_board.can_claim_fifty_moves(),
+        "is_repetition": current_board.can_claim_threefold_repetition(),
         "in_check": current_board.is_check()
     })
 
@@ -640,11 +683,12 @@ def js_make_move(uci_str):
     try:
         mv = chess.Move.from_uci(uci_str)
         if mv in current_board.legal_moves:
+            san = current_board.san(mv)
             current_board.push(mv)
-            return True
+            return json.dumps({"success": True, "san": san})
     except:
         pass
-    return False
+    return json.dumps({"success": False, "san": ""})
 
 def js_think(clock_ms):
     fen_str = current_board.fen()
@@ -736,7 +780,8 @@ def js_think(clock_ms):
 
       pyodide.globals.get("js_set_fen")(currentFen);
       const data = JSON.parse(pyodide.globals.get("js_get_board_state")());
-      if (data.side !== playerColor && !data.is_draw && legalMoves.length > 0) {
+      const isGameOver = data.is_checkmate || data.is_stalemate || data.is_insufficient || data.is_fifty_moves || data.is_repetition;
+      if (data.side !== playerColor && !isGameOver && legalMoves.length > 0) {
         triggerEngineMove();
       }
     }
@@ -748,7 +793,9 @@ def js_think(clock_ms):
       currentFen = data.fen;
       renderBoard();
 
-      if (data.side !== playerColor && !data.is_draw && legalMoves.length > 0) {
+      const isGameOver = data.is_checkmate || data.is_stalemate || data.is_insufficient || data.is_fifty_moves || data.is_repetition;
+
+      if (data.side !== playerColor && !isGameOver && legalMoves.length > 0) {
         triggerEngineMove();
       } else {
         checkGameStatus(data);
@@ -756,15 +803,30 @@ def js_think(clock_ms):
     }
 
     function checkGameStatus(state) {
-      if (state.legal.length === 0) {
-        if (state.in_check) {
-          statusEl.innerText = state.side === playerColor ? "Checkmate - Engine Wins" : "Checkmate - You Win!";
+      if (state.is_checkmate) {
+        if (state.side === playerColor) {
+          statusEl.innerText = "Checkmate - Engine Wins";
+          gameResult = playerColor === "w" ? "0-1" : "1-0";
         } else {
-          statusEl.innerText = "Draw by Stalemate";
+          statusEl.innerText = "Checkmate - You Win!";
+          gameResult = playerColor === "w" ? "1-0" : "0-1";
         }
         statusEl.className = "status-badge";
-      } else if (state.is_draw) {
-        statusEl.innerText = "Game Drawn";
+      } else if (state.is_stalemate) {
+        statusEl.innerText = "Draw by Stalemate";
+        gameResult = "1/2-1/2";
+        statusEl.className = "status-badge";
+      } else if (state.is_insufficient) {
+        statusEl.innerText = "Draw by Insufficient Material";
+        gameResult = "1/2-1/2";
+        statusEl.className = "status-badge";
+      } else if (state.is_fifty_moves) {
+        statusEl.innerText = "Draw by 50-Move Rule";
+        gameResult = "1/2-1/2";
+        statusEl.className = "status-badge";
+      } else if (state.is_repetition) {
+        statusEl.innerText = "Draw by Repetition";
+        gameResult = "1/2-1/2";
         statusEl.className = "status-badge";
       }
     }
@@ -829,7 +891,8 @@ def js_think(clock_ms):
 
     function handleSquareClick(sq) {
       const data = JSON.parse(pyodide.globals.get("js_get_board_state")());
-      if (data.side !== playerColor || legalMoves.length === 0) return;
+      const isGameOver = data.is_checkmate || data.is_stalemate || data.is_insufficient || data.is_fifty_moves || data.is_repetition;
+      if (data.side !== playerColor || isGameOver || legalMoves.length === 0) return;
 
       const piece = boardMailbox[sq];
       const isOwnPiece = (playerColor === "w" && piece > 0) || (playerColor === "b" && piece < 0);
@@ -887,12 +950,13 @@ def js_think(clock_ms):
 
     function applyMove(uci) {
       selectedSq = -1;
-      const success = pyodide.globals.get("js_make_move")(uci);
-      if (success) {
+      const resRaw = pyodide.globals.get("js_make_move")(uci);
+      const res = JSON.parse(resRaw);
+      if (res.success) {
         const f = parseUciSq(uci.slice(0, 2));
         const t = parseUciSq(uci.slice(2, 4));
         lastMove = { from: f, to: t };
-        recordMoveHistory(uci);
+        recordMoveHistory(res.san, uci);
         syncBoardState();
       }
     }
@@ -936,28 +1000,127 @@ def js_think(clock_ms):
       document.getElementById("meter-white").style.width = `${Math.max(5, Math.min(95, evalPercent))}%`;
     }
 
-    function recordMoveHistory(uci) {
-      moveList.push(uci);
+    function recordMoveHistory(san, uci) {
+      moveList.push({ san: san || uci, uci });
       const historyEl = document.getElementById("move-history");
       if (moveList.length % 2 !== 0) {
         const turnNo = Math.ceil(moveList.length / 2);
         const row = document.createElement("div");
         row.className = "history-row";
         row.id = `turn-${turnNo}`;
-        row.innerHTML = `<span class="history-idx">${turnNo}.</span><span class="history-move">${uci}</span>`;
+        row.innerHTML = `<span class="history-idx">${turnNo}.</span><span class="history-move">${san}</span>`;
         historyEl.appendChild(row);
       } else {
         const turnNo = moveList.length / 2;
         const row = document.getElementById(`turn-${turnNo}`);
         if (row) {
-          row.innerHTML += `<span class="history-move">${uci}</span>`;
+          row.innerHTML += `<span class="history-move">${san}</span>`;
         }
       }
       historyEl.scrollTop = historyEl.scrollHeight;
     }
 
+    function generateFormattedMovesString() {
+      let out = "";
+      for (let i = 0; i < moveList.length; i++) {
+        if (i % 2 === 0) {
+          const moveNumber = Math.floor(i / 2) + 1;
+          out += `${moveNumber}. ${moveList[i].san} `;
+        } else {
+          out += `${moveList[i].san} `;
+        }
+      }
+      return out.trim();
+    }
+
+    function generateFullPGN() {
+      const now = new Date();
+      const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`;
+      const engineMeta = ENGINE_METADATA[currentEngineKey];
+      const whiteName = playerColor === 'w' ? "Human Player" : engineMeta.name;
+      const blackName = playerColor === 'b' ? "Human Player" : engineMeta.name;
+
+      const headers = [
+        `[Event "AlphaKnight Arena Match"]`,
+        `[Site "Localhost"]`,
+        `[Date "${dateStr}"]`,
+        `[Round "1"]`,
+        `[White "${whiteName}"]`,
+        `[Black "${blackName}"]`,
+        `[Result "${gameResult}"]`
+      ];
+
+      const movesStr = generateFormattedMovesString();
+      const pgnBody = movesStr ? `${movesStr} ${gameResult}` : gameResult;
+      return `${headers.join("\n")}\n\n${pgnBody}\n`;
+    }
+
+    async function copyMoveText() {
+      const moves = generateFormattedMovesString();
+      if (!moves) {
+        notifyBtnFeedback("btn-copy-moves", "No moves yet!");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(moves);
+        notifyBtnFeedback("btn-copy-moves", "Copied Moves!");
+      } catch (err) {
+        fallbackCopyText(moves);
+        notifyBtnFeedback("btn-copy-moves", "Copied Moves!");
+      }
+    }
+
+    async function copyPGN() {
+      const pgn = generateFullPGN();
+      try {
+        await navigator.clipboard.writeText(pgn);
+        notifyBtnFeedback("btn-copy-pgn", "Copied PGN!");
+      } catch (err) {
+        fallbackCopyText(pgn);
+        notifyBtnFeedback("btn-copy-pgn", "Copied PGN!");
+      }
+    }
+
+    function exportPGN() {
+      const pgn = generateFullPGN();
+      const blob = new Blob([pgn], { type: "application/x-chess-pgn" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `alphaknight_${currentEngineKey}_${Date.now()}.pgn`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      notifyBtnFeedback("btn-export-pgn", "Exported!");
+    }
+
+    function fallbackCopyText(text) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+
+    function notifyBtnFeedback(btnId, msg) {
+      const btn = document.getElementById(btnId);
+      const originalText = btn.innerText;
+      btn.innerText = msg;
+      btn.style.color = "#56d364";
+      setTimeout(() => {
+        btn.innerText = originalText;
+        btn.style.color = "";
+      }, 1500);
+    }
+
     function startNewGame() {
       moveList = [];
+      gameResult = "*";
       document.getElementById("move-history").innerHTML = "";
       lastMove = { from: -1, to: -1 };
       selectedSq = -1;
@@ -1243,7 +1406,7 @@ def _piece_attacks(piece_type: int, square: int, occupied: int) -> int:
     return 0
 
 
-def _pawn_attacks_bb(pawns: int, color: bool) -> int:
+def _pawn_attacks(pawns: int, color: bool) -> int:
     if color == chess.WHITE:
         return (_shift(pawns, 7) | _shift(pawns, 9)) & MASK64
     return _shift(pawns, -7) | _shift(pawns, -9)
@@ -1312,13 +1475,13 @@ def _eval_pawns(board: chess.Board, color: bool) -> tuple[int, int]:
     mg += PAWN_DOUBLED[0] * count
     eg += PAWN_DOUBLED[1] * count
 
-    count = (pawns & _pawn_attacks_bb(pawns, not color)).bit_count()
+    count = (pawns & _pawn_attacks(pawns, not color)).bit_count()
     mg += PAWN_SUPPORT[0] * count
     eg += PAWN_SUPPORT[1] * count
 
     down = -8 if color == chess.WHITE else 8
     open_mask = (~_fill(enemy_pawns, down)) & MASK64
-    unsupported = (~_pawn_attacks_bb(pawns, color)) & MASK64
+    unsupported = (~_pawn_attacks(pawns, color)) & MASK64
     count = (pawns & open_mask & unsupported).bit_count()
     mg += PAWN_OPEN[0] * count
     eg += PAWN_OPEN[1] * count
@@ -1360,7 +1523,7 @@ def _init_eval_info(board: chess.Board) -> _EvalInfo:
         start_rank = RANK_MASKS[1 if color == chess.WHITE else 6]
         blocked_or_start = pawns & (start_rank | _shift(occupied, down))
         enemy_pawns = board.pawns & board.occupied_co[not color]
-        forbidden = blocked_or_start | _pawn_attacks_bb(enemy_pawns, not color)
+        forbidden = blocked_or_start | _pawn_attacks(enemy_pawns, not color)
         mobility[int(color)] = (~forbidden) & MASK64
         king_square = board.king(color)
         king_zone[int(color)] = KING_ATTACKS[king_square] if king_square is not None else 0
@@ -1459,13 +1622,13 @@ def _eval_threats(board: chess.Board, color: bool) -> tuple[int, int]:
     own_pawns = board.pawns & board.occupied_co[color]
     enemy_occ = board.occupied_co[not color]
     enemy_non_pawns = enemy_occ ^ (board.pawns & enemy_occ)
-    count = (_pawn_attacks_bb(own_pawns, color) & enemy_non_pawns).bit_count()
+    count = (_pawn_attacks(own_pawns, color) & enemy_non_pawns).bit_count()
     mg = PAWN_THREAT[0] * count
     eg = PAWN_THREAT[1] * count
 
     up = 8 if color == chess.WHITE else -8
     pushes = _shift(own_pawns, up) & (~board.occupied & MASK64)
-    count = (_pawn_attacks_bb(pushes, color) & enemy_non_pawns).bit_count()
+    count = (_pawn_attacks(pushes, color) & enemy_non_pawns).bit_count()
     mg += PUSH_THREAT[0] * count
     eg += PUSH_THREAT[1] * count
     return mg, eg
@@ -2801,7 +2964,7 @@ def _simple_see(board: chess.Board, move: chess.Move) -> int:
     return gain
 
 
-class _Engine:
+class _EngineTemplar:
     def __init__(self) -> None:
         self.history = [[[0 for _ in range(64)] for _ in range(64)] for _ in range(2)]
         self.killers = [[0, 0] for _ in range(MAX_PLY)]
@@ -3323,12 +3486,11 @@ class _Engine:
         return best_move.uci()
 
 
-_ENGINE = _Engine()
+_ENGINE_TEMPLAR = _EngineTemplar()
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    """Return a legal move in UCI notation for the position in ``fen``."""
-    return _ENGINE.choose_move(fen, max(0, time_left_ms))
+    return _ENGINE_TEMPLAR.choose_move(fen, max(0, time_left_ms))
   </script>
 
   <!-- ========================================================================= -->
@@ -3532,10 +3694,10 @@ class _EnginePaladin:
                 break
         return best_move.uci()
 
-_ENGINE = _EnginePaladin()
+_ENGINE_PALADIN = _EnginePaladin()
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    return _ENGINE.choose_move(fen, time_left_ms)
+    return _ENGINE_PALADIN.choose_move(fen, time_left_ms)
   </script>
 
   <!-- ========================================================================= -->
@@ -3631,10 +3793,10 @@ class _EngineTrojan:
                 break
         return best.uci()
 
-_ENGINE = _EngineTrojan()
+_ENGINE_TROJAN = _EngineTrojan()
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    return _ENGINE.choose_move(fen, time_left_ms)
+    return _ENGINE_TROJAN.choose_move(fen, time_left_ms)
   </script>
 
   <!-- ========================================================================= -->
@@ -3699,10 +3861,10 @@ class _EngineV0:
         scored.sort(key=lambda item: item[0], reverse=True)
         return scored[0][1].uci()
 
-_ENGINE = _EngineV0()
+_ENGINE_V0 = _EngineV0()
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    return _ENGINE.choose_move(fen, time_left_ms)
+    return _ENGINE_V0.choose_move(fen, time_left_ms)
   </script>
 
 </body>
